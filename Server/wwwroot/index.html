@@ -1,0 +1,1716 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0,user-scalable=no"/>
+  <title>PC 远程监控</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0;user-select:none}
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+         background:#111125;color:#eef;min-height:100vh}
+
+    /* ── 顶栏 ── */
+    header{display:flex;align-items:center;gap:10px;padding:12px 16px;
+           background:#1a1a34;border-bottom:1px solid #262650}
+    header h1{flex:1;font-size:18px;color:#5cf0b8}
+    .badge{font-size:11px;padding:3px 10px;border-radius:12px}
+    .badge.ok {background:#0a3d25;color:#5cf0b8}
+    .badge.err{background:#3d0a0a;color:#f07060}
+
+    /* ── PC 列表页 ── */
+    #listPage{padding:16px}
+    #pcGrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:12px}
+    .pcCard{background:#1a1a34;border:1px solid #262650;border-radius:10px;
+            padding:18px 12px;text-align:center;cursor:pointer;
+            position:relative;
+            transition:border-color .15s,background .15s}
+    .pcCard::after{content:'⠿';position:absolute;top:4px;right:6px;
+                   font-size:13px;color:#3a3a60;opacity:0;
+                   transition:opacity .15s;pointer-events:none}
+    .pcCard:hover::after{opacity:1}
+    .pcCard:hover,.pcCard:active{border-color:#5cf0b8;background:#0e2a1e}
+    .pcCard.offline{opacity:0.55}
+    .pcCard.offline:hover,.pcCard.offline:active{border-color:#262650;background:#1a1a34}
+    .offlineBadge{display:inline-block;font-size:10px;color:#aaa;background:#252542;
+                  border-radius:4px;padding:1px 5px;margin-top:5px}
+    .pcIcon{font-size:34px;margin-bottom:8px}
+    .pcName{font-size:14px;font-weight:600;word-break:break-all}
+    .pcId{font-size:10px;color:#778;margin-top:4px}
+    .emptyTip{color:#667;text-align:center;padding:40px 0}
+
+    /* ── 查看页 ── */
+    #viewPage{display:none;flex-direction:column;height:100vh}
+    #viewPage header{flex-shrink:0}
+    .backBtn{background:none;border:1px solid #5cf0b8;color:#5cf0b8;
+             padding:5px 12px;border-radius:6px;cursor:pointer;font-size:13px}
+    #pcTitle{margin-left:10px;font-size:15px}
+    #fpsInfo{margin-left:auto;font-size:11px;color:#778;cursor:pointer;
+             border-bottom:1px dotted #445;transition:color .15s,border-color .15s}
+    #fpsInfo:hover{color:#5cf0b8;border-bottom-color:#5cf0b8}
+    #screenWrap{flex:1;overflow:hidden;background:#000;display:flex;
+                align-items:center;justify-content:center;
+                touch-action:none;user-select:none}
+    #screenImg{max-width:100%;display:none}
+    #noSignal{color:#558;text-align:center;padding:60px 20px;font-size:14px;
+              align-self:center}
+
+    /* ── 质量选择弹窗 ── */
+    #qualityMask{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);
+                 z-index:100;align-items:center;justify-content:center}
+    #qualityMask.show{display:flex}
+    #qualityBox{background:#1a1a34;border:1px solid #262650;border-radius:14px;
+                padding:24px 20px;min-width:240px;text-align:center}
+    #qualityBox h2{font-size:15px;color:#5cf0b8;margin-bottom:6px}
+    #qualityBox p{font-size:12px;color:#778;margin-bottom:18px}
+    .qBtn{display:block;width:100%;padding:11px 0;margin-bottom:10px;
+          border:1px solid #262650;border-radius:8px;background:#111125;
+          color:#eef;font-size:14px;cursor:pointer;transition:border-color .15s,background .15s}
+    .qBtn:last-child{margin-bottom:0}
+    .qBtn:hover,.qBtn:active{border-color:#5cf0b8;background:#0e2a1e;color:#5cf0b8}
+    .qBtn.selected{border-color:#5cf0b8;border-width:2px}
+    .qBtn .qlabel{font-weight:700;font-size:15px}
+    .qBtn .qdesc{display:block;font-size:11px;color:#778;margin-top:3px}
+    .cancelBtn{margin-top:14px;background:none;border:none;color:#667;
+               font-size:13px;cursor:pointer;padding:4px 0}
+    .cancelBtn:hover{color:#eef}
+
+    /* ── 齿轮设置按钮 ── */
+    .gearBtn{position:absolute;top:10px;right:10px;background:none;border:none;
+             font-size:20px;cursor:pointer;color:#778;padding:4px;line-height:1}
+    .gearBtn:hover{color:#5cf0b8}
+
+    /* ── 设置面板 ── */
+    #settingsPanel{display:none;text-align:left}
+    #settingsPanel h3{font-size:14px;color:#5cf0b8;margin-bottom:14px;text-align:center}
+    .settingRow{margin-bottom:12px}
+    .settingRow label{font-size:11px;color:#99a;display:block;margin-bottom:4px}
+    .settingRow input[type=text]{
+      width:100%;background:#111125;border:1px solid #262650;
+      color:#eef;padding:7px 10px;border-radius:6px;font-size:13px;text-align:center}
+    .settingRow input[type=text]:focus{outline:none;border-color:#5cf0b8}
+    .ctrlBtn{display:block;width:100%;padding:10px 0;margin-bottom:8px;
+             border:1px solid #262650;border-radius:8px;background:#111125;
+             color:#eef;font-size:13px;cursor:pointer;transition:border-color .15s,background .15s}
+    .ctrlBtn:hover{border-color:#5cf0b8;background:#0e2a1e;color:#5cf0b8}
+    .ctrlBtn.danger{border-color:#4a1818}
+    .ctrlBtn.danger:hover{border-color:#f07060;color:#f07060;background:#250a0a}
+    .ctrlBtn:last-of-type{margin-bottom:0}
+
+    /* ── 客户端时间叠加层 ── */
+    #clientTimeOverlay{
+      position:absolute;top:0;right:0;
+      font-size:6px;font-weight:700;pointer-events:none;
+      will-change:font-size,top,right;
+      font-family:'Courier New',monospace;letter-spacing:0.3px;
+      display:none;z-index:10;text-align:right}
+    #clientTimeOverlay span{display:inline-block}
+
+    /* ── Toast 提示 ── */
+    .toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);
+           background:#1a1a34;border:1px solid #5cf0b8;color:#5cf0b8;
+           padding:8px 18px;border-radius:8px;font-size:13px;z-index:9999;
+           pointer-events:none;animation:fadeOut 2s forwards}
+    @keyframes fadeOut{0%{opacity:1}70%{opacity:1}100%{opacity:0}}
+
+    /* ── 视图切换按鈕 ── */
+    .viewToggleBtn{background:none;border:1px solid #262650;color:#778;
+                   padding:5px 11px;border-radius:6px;cursor:pointer;font-size:12px;
+                   white-space:nowrap}
+    .viewToggleBtn:hover,.viewToggleBtn:active{border-color:#5cf0b8;color:#5cf0b8;background:#0e2a1e}
+
+    /* ── 全屏监控页 ── */
+    #allScreensPage{display:none;flex-direction:column;height:100vh}
+    #allScreensGrid{flex:1;overflow-y:auto;padding:8px;background:#111125;
+                   display:grid;grid-template-columns:repeat(1,1fr);gap:12px}
+    .pcScreenRow{background:#1a1a34;border:1px solid #262650;border-radius:10px;
+                 overflow:hidden}
+    .pcScreenHeader{display:flex;align-items:center;padding:8px 12px;
+                    border-bottom:1px solid #262650;cursor:pointer}
+    .pcScreenName{font-size:13px;font-weight:600;color:#5cf0b8}
+    .pcScreenFps{margin-left:auto;font-size:11px;color:#778}
+    .pcScreenDismiss{margin-left:8px;background:none;border:none;color:#445;
+                     cursor:pointer;font-size:15px;line-height:1;padding:2px 4px;
+                     border-radius:4px;transition:color .12s,background .12s;
+                     flex-shrink:0}
+    .pcScreenDismiss:hover{color:#f07060;background:rgba(240,112,96,.12)}
+    .pcScreenImgWrap{background:#000;min-height:120px;display:flex;
+                     align-items:center;justify-content:center;overflow:hidden}
+    .pcScreenImg{width:100%;display:none}
+    .pcScreenNoSig{color:#558;text-align:center;padding:30px 20px;font-size:13px}
+    .pcScreenImgWrap{cursor:pointer}
+    .pcScreenImgWrap:active{opacity:.8}
+    .colBtn{background:none;border:none;color:#556;
+            padding:0 2px;cursor:pointer;font-size:11px;
+            transition:color .15s}
+    .colBtn:hover{color:#5cf0b8}
+    .colBtn.active{color:#5cf0b8}
+
+    /* ── 远程点击遮罩 ── */
+    .remoteOverlay{display:none;position:absolute;inset:0;z-index:20;
+                   cursor:crosshair;touch-action:none}
+
+    /* ── 远程输入工具栏 ── */
+    #remoteInputBar{display:none;position:fixed;bottom:0;left:0;right:0;
+                    background:rgba(16,16,40,.97);border-top:1px solid #2a2a55;
+                    z-index:210;padding:6px 8px 8px;flex-direction:column;gap:5px}
+    .rib-row{display:flex;flex-wrap:wrap;gap:4px;align-items:center}
+    .rib-btn{background:#111125;border:1px solid #2a2a55;color:#dde;
+             padding:5px 8px;border-radius:5px;font-size:12px;cursor:pointer;
+             min-width:34px;text-align:center;
+             transition:border-color .12s,background .12s;
+             -webkit-tap-highlight-color:transparent;user-select:none}
+    .rib-btn:hover{border-color:#3a8a6a;background:#091812;color:#7dd4aa}
+    .rib-btn:active{border-color:#5cf0b8;background:#0e2a1e;color:#5cf0b8}
+    .rib-btn.on{border-color:#5cf0b8;background:#0e2a1e;color:#5cf0b8;box-shadow:0 0 6px rgba(92,240,184,.5)}
+    .rib-btn.mod-on{border-color:#f0c050;background:#2a200a;color:#f0c050}
+    .rib-sep{color:#334;margin:0 1px;font-size:11px}
+    .rib-lbl{font-size:10px;color:#667;white-space:nowrap}
+    .rib-close{margin-left:auto;background:none;border:none;
+               color:#667;cursor:pointer;font-size:17px;padding:2px 6px;
+               line-height:1;transition:color .12s}
+    .rib-close:hover{color:#f07060}
+    #remoteTextInput{flex:1;background:#111125;border:1px solid #2a2a55;
+                     color:#eef;padding:6px 10px;border-radius:6px;font-size:13px}
+    #remoteTextInput:focus{outline:none;border-color:#5cf0b8}
+    .rib-send{background:#0e2a1e;border:1px solid #5cf0b8;color:#5cf0b8;
+              padding:6px 14px;border-radius:6px;font-size:12px;cursor:pointer;
+              white-space:nowrap;-webkit-tap-highlight-color:transparent}
+    .rib-send:active{background:#1a4030}
+
+    /* ── 操作确认弹窗 ── */
+    #cmdConfirmMask{display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);
+                    z-index:300;align-items:center;justify-content:center}
+    #cmdConfirmMask.show{display:flex}
+    #cmdConfirmBox{background:#1a1a34;border:1px solid #3a1818;border-radius:12px;
+                   padding:22px 24px;min-width:220px;text-align:center}
+    #cmdConfirmMsg{font-size:14px;color:#f0c0a0;margin-bottom:18px;line-height:1.5;white-space:pre-line}
+    .cmdConfirmBtns{display:flex;gap:10px;justify-content:center}
+    .cmdConfirmOk{flex:1;padding:9px 0;border:1px solid #f07060;border-radius:7px;
+                  background:#250a0a;color:#f07060;font-size:13px;cursor:pointer;
+                  transition:background .12s,color .12s}
+    .cmdConfirmOk:hover{background:#3d1212;color:#ff9080}
+    .cmdConfirmCancel{flex:1;padding:9px 0;border:1px solid #262650;border-radius:7px;
+                      background:#111125;color:#aab;font-size:13px;cursor:pointer;
+                      transition:background .12s,color .12s}
+    .cmdConfirmCancel:hover{background:#1a1a34;color:#eef}
+  </style>
+</head>
+<body>
+
+<!-- ══ 操作确认弹窗 ══ -->
+<div id="cmdConfirmMask" onclick="cancelCmdConfirm()">
+  <div id="cmdConfirmBox" onclick="event.stopPropagation()">
+    <p id="cmdConfirmMsg"></p>
+    <div class="cmdConfirmBtns">
+      <button class="cmdConfirmOk" onclick="doCmdConfirm()">确认执行</button>
+      <button class="cmdConfirmCancel" onclick="cancelCmdConfirm()">取消</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ 质量选择弹窗 ══ -->
+<div id="qualityMask" onclick="cancelQuality()">
+  <div id="qualityBox" style="position:relative" onclick="event.stopPropagation()">
+    <button class="gearBtn" onclick="toggleSettings()" title="设置">⚙️</button>
+
+    <!-- 画质选择内容 -->
+    <div id="qualityContent">
+      <h2 id="qualityTitle">选择画质</h2>
+      <p id="qualityPcName" style="color:#aab;margin-bottom:18px"></p>
+      <button class="qBtn" data-quality="30"  onclick="confirmWatch(30,1)"><span class="qlabel">🟢 省流</span><span class="qdesc">800px · JPEG 30%</span></button>
+      <button class="qBtn" data-quality="60"  onclick="confirmWatch(60,1)"><span class="qlabel">🟡 均衡</span><span class="qdesc">1280px · JPEG 60%</span></button>
+      <button class="qBtn" data-quality="78"  onclick="confirmWatch(78,1)"><span class="qlabel">🔴 高清</span><span class="qdesc">1920px · JPEG 78% · 1080p</span></button>
+      <button class="qBtn" data-quality="88"  onclick="confirmWatch(88,1)"><span class="qlabel">⚪ 超清</span><span class="qdesc">2048px · JPEG 88%</span></button>
+      <button class="qBtn" data-quality="100" onclick="confirmWatch(100,1)"><span class="qlabel">🔵 极清</span><span class="qdesc">2560px · JPEG 100%</span></button>
+      <button class="cancelBtn" onclick="cancelQuality()">取消</button>
+    </div>
+
+    <!-- 设置面板 -->
+    <div id="settingsPanel">
+      <h3>⚙️ 设置</h3>
+      <div class="settingRow">
+        <label>PC 备注名（留空则使用原名）</label>
+        <input type="text" id="remarkInput" placeholder="自定义名称..."/>
+      </div>
+      <button class="ctrlBtn" onclick="saveRemark()" style="margin-bottom:14px">💾 保存备注</button>
+      <div class="settingRow">
+        <label>定时锁定时段（格式 HH:mm-HH:mm，可跨凌晨，留空关闭）</label>
+        <input type="text" id="scheduleLockInput" placeholder="如 23:30-07:00"/>
+      </div>
+      <button class="ctrlBtn" onclick="saveScheduleLock()" style="margin-bottom:14px">⏰ 保存定时锁定</button>
+      <hr style="border:none;border-top:1px solid #1e1e40;margin-bottom:14px"/>
+      <button id="btnLock"   class="ctrlBtn danger" onclick="sendControl('lock_input')">🔒 锁定鼠标</button>
+      <button id="btnUnlock" class="ctrlBtn" onclick="sendControl('unlock_input')">🔓 解锁鼠标</button>
+      <button class="ctrlBtn" onclick="openRemoteInputMode()">🖱️ 远程控制</button>
+      <hr style="border:none;border-top:1px solid #1e1e40;margin-bottom:14px"/>
+      <!-- <button id="btnLockScreen" class="ctrlBtn danger" onclick="sendControl('lock_screen')">💻 进入锁屏</button> -->
+      <button id="btnRestart" class="ctrlBtn danger" onclick="askCmdConfirm('restart','确认要强制重启该电脑？')" style="margin-top:6px">🔄 强制重启</button>
+      <button id="btnShutdown" class="ctrlBtn danger" onclick="askCmdConfirm('shutdown','确认要强制关机？\n关机后将无法远程唤醒！')" style="margin-top:6px">⚡ 强制关机</button>
+      <button class="cancelBtn" onclick="toggleSettings()">← 返回</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ PC 列表页 ══ -->
+<div id="listPage">
+  <header>
+    <h1>💻 PC 远程监控</h1>
+    <span id="badge" class="badge err">未连接</span>
+    <button class="viewToggleBtn" style="margin-left:auto" onclick="openAllScreens()" title="全屏监控模式">⊞ 全屏监控</button>
+  </header>
+  <div style="padding:16px">
+    <div id="pcGrid"><p class="emptyTip">等待 PC 连接...</p></div>
+  </div>
+</div>
+
+<!-- ══ 查看页 ══ -->
+<div id="viewPage">
+  <header>
+    <button class="backBtn" onclick="goBack()">&#8592; 返回</button>
+    <span id="pcTitle"></span>
+    <span id="fpsInfo" onclick="openQualityChange()" title="点击修改画质"></span>
+  </header>
+  <div id="screenWrap" style="position:relative">
+    <img id="screenImg" alt="screen"/>
+    <div id="noSignal">⏳ 等待画面...</div>
+    <div id="clientTimeOverlay"></div>
+    <div id="remoteClickOverlay" class="remoteOverlay"></div>
+  </div>
+</div>
+
+<!-- ══ 全屏监控页 ══ -->
+<div id="allScreensPage">
+  <header>
+    <button class="backBtn" onclick="exitAllScreens()">&#8592; 返回</button>
+    <span style="margin-left:10px;font-size:15px">全屏监控</span>
+    <div style="display:flex;align-items:center;gap:2px;margin-left:auto" id="colBtns">
+      <button class="colBtn" id="colBtn1" onclick="setAllScreensCols(1)">1列</button>
+      <span style="color:#334;font-size:10px;margin:0 1px">·</span>
+      <button class="colBtn" id="colBtn2" onclick="setAllScreensCols(2)">2列</button>
+      <span style="color:#334;font-size:10px;margin:0 1px">·</span>
+      <button class="colBtn" id="colBtn3" onclick="setAllScreensCols(3)">3列</button>
+      <span style="color:#334;font-size:10px;margin:0 6px">|</span>
+    </div>
+    <span id="allScreensInfo" onclick="openAllScreensQualityChange()" title="点击修改画质"
+          style="font-size:11px;color:#778;cursor:pointer;
+                 border-bottom:1px dotted #445;transition:color .15s,border-bottom-color .15s"
+          onmouseover="this.style.color='#5cf0b8';this.style.borderBottomColor='#5cf0b8'"
+          onmouseout="this.style.color='#778';this.style.borderBottomColor='#445'"></span>
+  </header>
+  <div id="allScreensGrid"></div>
+</div>
+
+<!-- ══ 远程输入工具栏 ══ -->
+<div id="remoteInputBar">
+  <!-- 行1：点击类型 + 滚轮 + 修饰键 + 关闭 -->
+  <div class="rib-row">
+    <span class="rib-lbl">点击:</span>
+    <button class="rib-btn on"  id="rim0" onclick="setClickMode(0)">左键</button>
+    <!-- <button class="rib-btn"     id="rim1" onclick="setClickMode(1)">双击</button> -->
+    <button class="rib-btn"     id="rim2" onclick="setClickMode(2)">右键</button>
+    <button class="rib-btn"     id="rim3" onclick="setClickMode(3)">中键</button>
+    <!-- <span class="rib-sep">|</span> -->
+    <button class="rib-btn"     id="ribDragBtn" onclick="toggleRemoteDragMode()">拽</button>
+    <span class="rib-sep">|</span>
+    <button class="rib-btn" onclick="sendScrollCmd(3)" title="向上滚动">↑滚</button>
+    <button class="rib-btn" onclick="sendScrollCmd(-3)" title="向下滚动">↓滚</button>
+    <button class="rib-close" onclick="closeRemoteInput()" title="关闭">✕</button>
+  </div>
+  <div class="rib-row">
+    <button class="rib-btn" id="modCtrl"  onclick="toggleMod('ctrl')">Ctrl</button>
+    <button class="rib-btn" id="modAlt"   onclick="toggleMod('alt')">Alt</button>
+    <button class="rib-btn" id="modShift" onclick="toggleMod('shift')">⇧Shift</button>
+    <button class="rib-btn" onclick="sendKeyCmd('copy')"      title="Ctrl+C">复制</button>
+    <button class="rib-btn" onclick="sendKeyCmd('paste')"     title="Ctrl+V">粘贴</button>
+    <button class="rib-btn" onclick="sendKeyCmd('cut')"       title="Ctrl+X">剪切</button>
+    <button class="rib-btn" onclick="sendKeyCmd('undo')"      title="Ctrl+Z">撤销</button>
+    <button class="rib-btn" onclick="sendKeyCmd('selectall')" title="Ctrl+A">全选</button>
+    <!-- <span class="rib-sep">|</span> -->
+    <button class="rib-btn" onclick="sendKeyCmd('esc')">Esc</button>
+    <!-- <span class="rib-sep">|</span> -->
+    <button class="rib-btn" onclick="sendKeyCmd('back')">⌫Back</button>
+    <button class="rib-btn" onclick="sendKeyCmd('enter')">↵Enter</button>
+    <button class="rib-btn" onclick="sendKeyCmd('tab')">Tab</button>
+    <button class="rib-btn" onclick="sendKeyCmd('del')">Del</button>
+    <!-- <span class="rib-sep">|</span> -->
+    <button class="rib-btn" onclick="sendKeyCmd('f2')">F2</button>
+  </div>
+  <!-- 行4：文字输入 -->
+  <div class="rib-row" style="gap:6px">
+    <input type="text" id="remoteTextInput" placeholder="输入文字（支持中英文）..."/>
+    <button class="rib-send" onclick="sendTextCmd()">发送</button>
+  </div>
+</div>
+
+<script>
+"use strict";
+let ws, currentPcId = null, reconnTimer = null;
+let autoOpenedAllScreens = false; // 首次加载时自动进入全屏监控
+let fpsCount = 0, lastFpsTs = Date.now();
+let watchStartTs = 0; // 发出 watch 命令时的本地时间戳，用于过滤过期帧
+
+// 全屏监控列数（记住上次选择）
+let allScreensCols = parseInt(localStorage.getItem('allScreensCols') || '1');
+// 全屏监控临时叉掉的 PC（客户端记忆）
+let allScreensDismissedPcs = new Set();
+
+// 移动端检测：覆盖 Android/iOS/UC/QQ/360/搜狗/微信/微博/钉钉/华为/小米/OPPO/vivo 等
+const _isMobile = (function() {
+  const ua = navigator.userAgent;
+  if (/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua)) return true;
+  if (/CriOS|FxiOS|UCBrowser|MQQBrowser|micromessenger|MicroMessenger/i.test(ua)) return true;
+  if (/Weibo|DingTalk|miniprogram|HMSCore|MiuiBrowser|OppoBrowser|VivoBrowser/i.test(ua)) return true;
+  // 触摸设备且屏幕较窄（平板兜底）
+  if (('ontouchstart' in window || navigator.maxTouchPoints > 1) && window.screen.width <= 1024) return true;
+  return false;
+})();
+
+// 全屏监控模式状态
+const pcRemarks  = {}; // pcId → 服务器广播的备注名
+const pcVersions = {}; // pcId → 客户端版本号
+let viewMode = 'icon'; // 'icon' | 'single' | 'allscreens'
+let pendingMode = 'single'; // 'single' | 'all'
+let allScreensQuality = 60, allScreensFps = 2, watchAllStartTs = 0;
+let allScreensFpsCounts = {}, allScreensFpsTs = {};
+let prevUrls = {}; // pcId → blob URL（全屏模式）
+let currentPcs = []; // 最新 pcList
+let prevPage = 'list'; // 'list' | 'allscreens'
+
+// 单PC查看质量状态
+let currentViewQuality = 30; // 当前单PC查看的JPEG质量
+let currentPcNameStr = ''; // 当前查看PC的原始名称
+
+// ── 连接 ──────────────────────────────────────────────────────
+function connect(){
+  clearTimeout(reconnTimer);
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}/ws?role=viewer`);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => {
+    setBadge(true);
+    if (viewMode === 'allscreens') {
+      // 保持全屏监控页，重置时间戳并重新订阅，等 pcList 回来后更新列表
+      watchAllStartTs = Date.now();
+      ws.send(JSON.stringify({action:'watchAll', quality: allScreensQuality, fps: allScreensFps}));
+    } else if (viewMode === 'single' && currentPcId) {
+      // 断线重连：保持单PC查看页，重新订阅推流
+      watchStartTs = Date.now();
+      fpsCount = 0; lastFpsTs = Date.now();
+      ws.send(JSON.stringify({action:'watch', pcId: currentPcId, quality: currentViewQuality, fps: 1}));
+    }
+    clearScreen();
+  };
+  ws.onclose = ws.onerror = () => {
+    setBadge(false);
+    reconnTimer = setTimeout(connect, 3000);
+  };
+  ws.onmessage = ({data}) => {
+    if (data instanceof ArrayBuffer) {
+      const frame = parseFrame(data);
+      if (!frame) return;
+      if (viewMode === 'allscreens') showFrameAllScreens(frame);
+      else if (viewMode === 'single') showFrameSingle(frame);
+    } else {
+      const msg = JSON.parse(data);
+      if (msg.type === 'pcList') {
+        renderPcList(msg.pcs);
+        if (viewMode === 'allscreens') updateAllScreensList(msg.pcs);
+        else if (viewMode === 'single' && currentPcId) {
+          // 单PC查看中：若被查看的PC已离线，主动取消订阅（让服务器停止该观察者）
+          const pc = msg.pcs.find(p => p.Id === currentPcId);
+          if (!pc || pc.Online === false) {
+            ws.send(JSON.stringify({action:'unwatch'}));
+          }
+        } else if (!autoOpenedAllScreens && viewMode === 'icon') {
+          // 首次收到 pcList 后，仅当有在线 PC 时才自动进入全屏监控
+          autoOpenedAllScreens = true;
+          const onlineCount = msg.pcs.filter(p => p.Online !== false).length;
+          if (onlineCount > 0) openAllScreens();
+        }
+      }
+    }
+  };
+}
+
+function clearScreen(){
+  const img = document.getElementById('screenImg');
+  if (img.src && img.src.startsWith('blob:')) URL.revokeObjectURL(img.src);
+  img.removeAttribute('src');
+  img.style.display = 'none';
+  if (_svZoomReset) _svZoomReset();
+  prevUrl = null;
+  const tEl = document.getElementById('clientTimeOverlay');
+  tEl.style.display = 'none';
+  tEl.innerHTML = '';
+  document.getElementById('noSignal').style.display = 'block';
+}
+
+function setBadge(ok){
+  const el = document.getElementById('badge');
+  el.textContent = ok ? '已连接' : '未连接';
+  el.className = 'badge ' + (ok ? 'ok' : 'err');
+}
+
+// ── 渲染 PC 列表 ─────────────────────────────────────────────
+// 卡片顺序持久化（拖拽排序）
+function loadCardOrder(){ try{ return JSON.parse(localStorage.getItem('pcCardOrder')||'[]'); }catch(e){ return []; } }
+function saveCardOrder(ids){ localStorage.setItem('pcCardOrder', JSON.stringify(ids)); }
+function applyCardOrder(pcs){
+  const order = loadCardOrder();
+  if(!order.length) return pcs;
+  const idx = {};
+  order.forEach((id,i)=>{ idx[id]=i; });
+  return [...pcs].sort((a,b)=>
+    (Object.prototype.hasOwnProperty.call(idx,a.Id)?idx[a.Id]:9999) -
+    (Object.prototype.hasOwnProperty.call(idx,b.Id)?idx[b.Id]:9999));
+}
+
+const pcLocked = {}; // 内存缓存各 PC 锁定状态
+const pcScheduleLocks = {}; // 内存缓存各 PC 定时锁定时段
+function renderPcList(pcs){
+  currentPcs = pcs;
+  const grid = document.getElementById('pcGrid');
+  if (!pcs.length){
+    grid.innerHTML = '<p class="emptyTip">暂无 PC 连接</p>';
+    return;
+  }
+  pcs.forEach(p => {
+    pcLocked[p.Id] = !!p.Locked;
+    if (p.Remark != null) { if (p.Remark) pcRemarks[p.Id] = p.Remark; else delete pcRemarks[p.Id]; }
+    if (p.Version) pcVersions[p.Id] = p.Version;
+    pcScheduleLocks[p.Id] = p.ScheduleLock || '';
+  });
+  const orderedPcs = applyCardOrder(pcs);
+  grid.innerHTML = orderedPcs.map(p => {
+    const displayName = getDisplayName(p.Id, p.Name);
+    const lockBadge   = p.Locked ? '<span style="font-size:10px;color:#f07060;margin-left:4px">🔒</span>' : '';
+    const schedBadge  = pcScheduleLocks[p.Id] ? '<span style="font-size:10px;color:#a0c8f0;margin-left:3px" title="定时锁: ' + esc(pcScheduleLocks[p.Id]) + '">⏰</span>' : '';
+    const isOnline    = p.Online !== false;
+    const offlineBadge = isOnline ? '' : '<div><span class="offlineBadge">离线</span></div>';
+    const cardCls  = isOnline ? 'pcCard' : 'pcCard offline';
+    const clickEvt = isOnline
+      ? `onclick="watchPc('${esc(p.Id)}','${esc(p.Name)}')"`
+      : `onclick="showOfflineSettings('${esc(p.Id)}','${esc(p.Name)}')"`;
+    return `<div class="${cardCls}" data-pcid="${esc(p.Id)}" ${clickEvt}>
+      <div class="pcIcon">${isOnline ? '🖥️' : '💻'}</div>
+      <div class="pcName">${esc(displayName)}${lockBadge}${schedBadge}</div>
+      <div class="pcId">${esc(p.Id)}</div>
+      ${offlineBadge}
+    </div>`;
+  }).join('');
+}
+
+function getDisplayName(pcId, originalName){
+  return pcRemarks[pcId] || originalName;
+}
+
+function esc(s){ return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+// ── 点击 PC 卡片 → 弹出质量选择 ────────────────────────────
+let pendingPcId = null, pendingPcName = null;
+function watchPc(pcId, pcName){
+  pendingMode   = 'single';
+  pendingPcId   = pcId;
+  pendingPcName = pcName;
+  document.getElementById('qualityPcName').textContent = getDisplayName(pcId, pcName);
+  document.getElementById('qualityMask').classList.add('show');
+  // 重置到质量选择视图
+  document.getElementById('qualityContent').style.display = 'block';
+  document.getElementById('settingsPanel').style.display  = 'none';
+  highlightQualityBtn(0); // 新PC无预设画质，清除选中
+}
+
+function highlightQualityBtn(quality){
+  document.querySelectorAll('#qualityContent .qBtn').forEach(btn => {
+    btn.classList.toggle('selected', Number(btn.dataset.quality) === quality);
+  });
+}
+
+function cancelQuality(){
+  document.getElementById('qualityMask').classList.remove('show');
+  pendingPcId = pendingPcName = null;
+  pendingMode = 'single';
+  // 重置设置面板状态
+  settingsOpen = false;
+  document.getElementById('qualityContent').style.display = 'block';
+  document.getElementById('settingsPanel').style.display  = 'none';
+  document.getElementById('qualityTitle').textContent = '选择画质';
+  highlightQualityBtn(0); // 清除选中状态
+}
+
+// ── 在单PC查看页内点击质量信息 → 修改画质 ──────────────────
+function openQualityChange(){
+  pendingMode = 'changeQuality';
+  pendingPcId = currentPcId;
+  pendingPcName = currentPcNameStr;
+  document.getElementById('qualityTitle').textContent = '修改画质';
+  document.getElementById('qualityPcName').textContent = getDisplayName(currentPcId, currentPcNameStr);
+  document.getElementById('qualityMask').classList.add('show');
+  document.getElementById('qualityContent').style.display = 'block';
+  document.getElementById('settingsPanel').style.display  = 'none';
+  settingsOpen = false;
+  highlightQualityBtn(currentViewQuality); // 高亮当前画质
+}
+
+// ── 从全屏监控页点击单台PC → 进入单PC查看页 ─────────────────
+function watchPcFromAllScreens(pcId, pcName){
+  openFocusedPc(pcId, pcName);
+}
+
+// ── 齿轮设置面板 ─────────────────────────────────────────────
+let settingsOpen = false;
+function toggleSettings(){
+  if (pendingMode === 'all' && !pendingPcId) return; // 纯全屏模式无单 PC 设置
+  if (pendingMode === 'allscreens_settings') { cancelQuality(); return; } // 全屏标题弹出设置，返回即关闭
+  settingsOpen = !settingsOpen;
+  document.getElementById('qualityContent').style.display = settingsOpen ? 'none'  : 'block';
+  document.getElementById('settingsPanel').style.display  = settingsOpen ? 'block' : 'none';
+  if (settingsOpen && pendingPcId){
+    document.getElementById('remarkInput').value = pcRemarks[pendingPcId] || '';
+    document.getElementById('scheduleLockInput').value = pcScheduleLocks[pendingPcId] || '';
+    document.getElementById('btnLock').textContent = !!pcLocked[pendingPcId] ? '✅ 已锁定，再次锁定' : '🔒 锁定鼠标';
+  }
+}
+
+// 从全屏监控页标题点击弹出设置面板（不进入单PC视频页）
+function showAllScreensPcSettings(pcId, pcName){
+  pendingMode   = 'allscreens_settings';
+  pendingPcId   = pcId;
+  pendingPcName = pcName;
+  settingsOpen  = true;
+  document.getElementById('qualityPcName').textContent = getDisplayName(pcId, pcName);
+  document.getElementById('qualityMask').classList.add('show');
+  document.getElementById('qualityContent').style.display = 'none';
+  document.getElementById('settingsPanel').style.display  = 'block';
+  document.getElementById('remarkInput').value = pcRemarks[pcId] || '';
+  document.getElementById('scheduleLockInput').value = pcScheduleLocks[pcId] || '';
+  document.getElementById('btnLock').textContent = !!pcLocked[pcId] ? '✅ 已锁定，再次锁定' : '🔒 锁定鼠标';
+}
+
+// 离线 PC 直接弹出设置面板
+function showOfflineSettings(pcId, pcName){
+  pendingMode   = 'single';
+  pendingPcId   = pcId;
+  pendingPcName = pcName;
+  settingsOpen  = true;
+  document.getElementById('qualityPcName').textContent = getDisplayName(pcId, pcName);
+  document.getElementById('qualityMask').classList.add('show');
+  // 直接显示设置面板，跳过画质选择
+  document.getElementById('qualityContent').style.display = 'none';
+  document.getElementById('settingsPanel').style.display  = 'block';
+  // 填充备注
+  document.getElementById('remarkInput').value = pcRemarks[pcId] || '';
+  document.getElementById('scheduleLockInput').value = pcScheduleLocks[pcId] || '';
+  document.getElementById('btnLock').textContent = !!pcLocked[pcId] ? '✅ 已锁定，再次锁定' : '🔒 锁定鼠标';
+}
+
+function saveRemark(){
+  if (!pendingPcId) return;
+  const v = document.getElementById('remarkInput').value.trim();
+  if (ws && ws.readyState === WebSocket.OPEN)
+    ws.send(JSON.stringify({action:'setRemark', pcId: pendingPcId, remark: v}));
+  // 乐观更新本地缓存
+  if (v) pcRemarks[pendingPcId] = v;
+  else   delete pcRemarks[pendingPcId];
+  showToast('备注已保存');
+  // 刷新列表显示名
+  document.getElementById('qualityPcName').textContent = getDisplayName(pendingPcId, pendingPcName);
+}
+
+function saveScheduleLock(){
+  if (!pendingPcId) return;
+  const v = document.getElementById('scheduleLockInput').value.trim();
+  // 格式校验：空字符串表示取消，否则必须符合 HH:mm-HH:mm
+  if (v && !/^\d{1,2}:\d{2}-\d{1,2}:\d{2}$/.test(v)) {
+    showToast('格式错误，请填写 HH:mm-HH:mm（如 23:30-07:00）');
+    return;
+  }
+  if (ws && ws.readyState === WebSocket.OPEN)
+    ws.send(JSON.stringify({action:'setScheduleLock', pcId: pendingPcId, scheduleLock: v}));
+  pcScheduleLocks[pendingPcId] = v;
+  showToast(v ? `定时锁定已设为 ${v}` : '定时锁定已关闭');
+}
+
+function sendControl(cmd){
+  if (!pendingPcId) return;
+  if (ws && ws.readyState === WebSocket.OPEN)
+    ws.send(JSON.stringify({action:'control', pcId: pendingPcId, cmd}));
+  // 乐观更新本地锁定缓存
+  if (cmd === 'lock_input')   pcLocked[pendingPcId] = true;
+  if (cmd === 'unlock_input') pcLocked[pendingPcId] = false;
+  if (cmd === 'lock_input' || cmd === 'unlock_input'){
+    const isLocked = !!pcLocked[pendingPcId];
+    document.getElementById('btnLock').textContent = isLocked ? '✅ 已锁定，再次锁定' : '🔒 锁定鼠标';
+  }
+  const labels = {lock_input:'锁定命令已发送',unlock_input:'解锁命令已发送',lock_screen:'锁屏命令已发送',restart:'重启命令已发送',shutdown:'关机命令已发送'};
+  showToast(labels[cmd] || '命令已发送');
+}
+
+// ── 危险命令二次确认 ──────────────────────────────────────────
+let _cmdConfirmAction = null;
+function askCmdConfirm(cmd, msg){
+  _cmdConfirmAction = cmd;
+  document.getElementById('cmdConfirmMsg').textContent = msg;
+  document.getElementById('cmdConfirmMask').classList.add('show');
+}
+function doCmdConfirm(){
+  document.getElementById('cmdConfirmMask').classList.remove('show');
+  if (!_cmdConfirmAction) return;
+  const cmd = _cmdConfirmAction;
+  _cmdConfirmAction = null;
+  sendControl(cmd);
+  cancelQuality();             // 关闭设置面板
+  if (viewMode === 'single') goBack(); // 退出单机视频页
+}
+function cancelCmdConfirm(){
+  document.getElementById('cmdConfirmMask').classList.remove('show');
+  _cmdConfirmAction = null;
+}
+
+function showToast(msg){
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.textContent = msg;
+  document.body.appendChild(el);
+  el.addEventListener('animationend', () => el.remove());
+}
+
+// ── 确认画质后开始观看 ─────────────────────
+function confirmWatch(quality, fps){
+  document.getElementById('qualityMask').classList.remove('show');
+  if (pendingMode === 'allscreens_settings'){
+    // 从全屏监控标题入口打开，不允许切换到单PC页，直接关闭
+    pendingPcId = pendingPcName = null;
+    pendingMode = 'single';
+    settingsOpen = false;
+    document.getElementById('qualityContent').style.display = 'block';
+    document.getElementById('settingsPanel').style.display  = 'none';
+    return;
+  }
+  if (pendingMode === 'all'){
+    startAllScreens(quality, fps);
+    return;
+  }
+  if (pendingMode === 'changeQuality'){
+    // 在单PC查看页内修改画质，不跳转页面
+    currentViewQuality = quality;
+    watchStartTs = Date.now();
+    fpsCount = 0; lastFpsTs = Date.now();
+    ws.send(JSON.stringify({action:'watch', pcId: currentPcId, quality, fps}));
+    document.getElementById('fpsInfo').textContent = qualityLabel(quality);
+    pendingPcId = pendingPcName = null;
+    pendingMode = 'single';
+    return;
+  }
+  // pendingMode === 'single'：进入单PC查看页
+  if (!pendingPcId) return;
+  currentPcId = pendingPcId;
+  currentPcNameStr = pendingPcName || '';
+  currentViewQuality = quality;
+  viewMode = 'single';
+  watchStartTs = Date.now();
+  document.getElementById('pcTitle').textContent = getDisplayName(pendingPcId, pendingPcName);
+  document.getElementById('fpsInfo').textContent = qualityLabel(quality);
+  document.getElementById('listPage').style.display = 'none';
+  document.getElementById('viewPage').style.display = 'flex';
+  clearScreen();
+  fpsCount = 0; lastFpsTs = Date.now();
+  ws.send(JSON.stringify({action:'watch', pcId: currentPcId, quality, fps}));
+  pendingPcId = pendingPcName = null;
+}
+
+// ── 返回 ──────────────────────────────────────────────────
+function goBack(){
+  if (ws && ws.readyState === WebSocket.OPEN)
+    ws.send(JSON.stringify({action:'unwatch'}));
+  currentPcId = null;
+  closeRemoteInput();
+  clearScreen();
+  document.getElementById('viewPage').style.display = 'none';
+  if (prevPage === 'allscreens') {
+    prevPage = 'list';
+    _resumeAllScreens();
+  } else {
+    viewMode = 'icon';
+    document.getElementById('listPage').style.display = 'block';
+  }
+}
+
+// ── 页面关闭/刷新时停止推流 ────────────────────────────
+window.addEventListener('beforeunload', () => {
+  if (ws && ws.readyState === WebSocket.OPEN && (currentPcId || viewMode === 'allscreens'))
+    ws.send(JSON.stringify({action:'unwatch'}));
+});
+
+// 最小化/切出标签时暂停推流（节省流量），还原后自动恢复
+document.addEventListener('visibilitychange', () => {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (document.hidden) {
+    // 隐藏：停止推流，清除画面，但保持页面状态不退出
+    if (viewMode === 'single' && currentPcId) {
+      ws.send(JSON.stringify({action:'unwatch'}));
+      clearScreen();
+      document.getElementById('fpsInfo').textContent = qualityLabel(currentViewQuality);
+    } else if (viewMode === 'allscreens') {
+      ws.send(JSON.stringify({action:'unwatch'}));
+      // 释放所有帧 blob，重置各PC画面为等待状态
+      Object.keys(prevUrls).forEach(id => { URL.revokeObjectURL(prevUrls[id]); delete prevUrls[id]; });
+      allScreensFpsCounts = {}; allScreensFpsTs = {};
+      document.querySelectorAll('.pcScreenImg').forEach(img => {
+        if (img.src && img.src.startsWith('blob:')) URL.revokeObjectURL(img.src);
+        img.removeAttribute('src'); img.style.display = 'none';
+      });
+      document.querySelectorAll('.pcScreenNoSig').forEach(el => el.style.display = 'block');
+
+    }
+  } else {
+    // 恢复：重新订阅推流
+    if (viewMode === 'single' && currentPcId) {
+      watchStartTs = Date.now();
+      fpsCount = 0; lastFpsTs = Date.now();
+      ws.send(JSON.stringify({action:'watch', pcId: currentPcId, quality: currentViewQuality, fps: 1}));
+    } else if (viewMode === 'allscreens') {
+      watchAllStartTs = Date.now();
+      ws.send(JSON.stringify({action:'watchAll', quality: allScreensQuality, fps: allScreensFps}));
+      // 重新向服务器注册排除
+      allScreensDismissedPcs.forEach(pcId =>
+        ws.send(JSON.stringify({action:'excludePc', pcId}))
+      );
+    }
+  }
+});
+
+// ── 帧解析 & 显示 ─────────────────────────────────────────────
+// 帧格式: [8字节服务器UTC毫秒ts][1字节pcId长度][N字节pcId][8字节客户端UTC毫秒ts][JPEG...]
+const MAX_FRAME_AGE_MS = 2000;
+let prevUrl = null;
+// 离屏 Canvas 用于逐字采样背景亮度
+let offCanvas = null, offCtx = null;
+
+function parseFrame(buf){
+  if (buf.byteLength < 10) return null;
+  const dv = new DataView(buf);
+  const tsLow  = dv.getUint32(0, true);
+  const tsHigh = dv.getUint32(4, true);
+  const serverTs = tsHigh * 4294967296 + tsLow;
+  const pcIdLen = dv.getUint8(8);
+  if (buf.byteLength < 9 + pcIdLen + 8) return null;
+  const pcId    = new TextDecoder().decode(new Uint8Array(buf, 9, pcIdLen));
+  // 跳过 8 字节客户端时间戳
+  const jpegBuf = buf.slice(9 + pcIdLen + 8);
+  return {serverTs, pcId, jpegBuf};
+}
+
+// 单 PC 模式显示帧
+function showFrameSingle({serverTs, pcId: framePcId, jpegBuf}){
+  if (framePcId !== currentPcId) return; // 过滤残留的其他 PC 帧（watchAll 切换时的竞态）
+  const age = Date.now() - serverTs;
+  if (age > MAX_FRAME_AGE_MS) return;
+  if (serverTs < watchStartTs - 500) return;
+
+  const img = document.getElementById('screenImg');
+  document.getElementById('noSignal').style.display = 'none';
+  img.style.display = 'block';
+
+  const url = URL.createObjectURL(new Blob([jpegBuf], {type:'image/jpeg'}));
+  img.onload = () => {
+    if (prevUrl) URL.revokeObjectURL(prevUrl);
+    prevUrl = url;
+    updateTimeColorPerChar(serverTs); // 图像加载后一次性更新时间+颜色，避免闪烁
+  };
+  img.src = url;
+
+  // 远程控制进行中时不显示时间与版本号
+  const tOverlay = document.getElementById('clientTimeOverlay');
+  if (remoteInputActive){
+    tOverlay.style.display = 'none';
+    tOverlay.innerHTML = '';
+  } else {
+    // 时间在 onload 里统一更新，此处不预写 textContent（防止闪烁）
+    tOverlay.style.display = 'block';
+  }
+
+  // FPS 统计
+  const now = Date.now();
+  if (now - lastFpsTs >= 1000){
+    document.getElementById('fpsInfo').textContent = qualityLabel(currentViewQuality);
+    fpsCount = 0; lastFpsTs = now;
+  }
+  fpsCount++;
+}
+
+// ── 全屏监控模式显示帧 ────────────────────────────────────────
+function showFrameAllScreens({serverTs, pcId, jpegBuf}){
+  const age = Date.now() - serverTs;
+  if (age > MAX_FRAME_AGE_MS) return;
+  if (serverTs < watchAllStartTs - 500) return;
+
+  const img   = document.getElementById('pcimg_'   + pcId);
+  const nosig = document.getElementById('pcnosig_' + pcId);
+  if (!img) return; // PC 卡片尚未创建
+
+  if (nosig) nosig.style.display = 'none';
+  img.style.display = 'block';
+
+  const url    = URL.createObjectURL(new Blob([jpegBuf], {type:'image/jpeg'}));
+  const oldUrl = prevUrls[pcId];
+  img.onload = () => {
+    if (oldUrl) URL.revokeObjectURL(oldUrl);
+    prevUrls[pcId] = url;
+  };
+  img.src = url;
+
+  const now = Date.now();
+  if (!(pcId in allScreensFpsCounts)){ allScreensFpsCounts[pcId] = 0; allScreensFpsTs[pcId] = now; }
+  if (now - allScreensFpsTs[pcId] >= 1000){
+    const fpsEl = document.getElementById('pcfps_' + pcId);
+    if (fpsEl) fpsEl.textContent = `${allScreensFpsCounts[pcId]} fps`;
+    allScreensFpsCounts[pcId] = 0;
+    allScreensFpsTs[pcId] = now;
+  }
+  allScreensFpsCounts[pcId]++;
+}
+
+// ── 全屏监控：聚焦单台PC（复用 #viewPage）────────────────────────────────────
+function openFocusedPc(pcId, pcName){
+  prevPage = 'allscreens';
+  currentPcId = pcId;
+  currentPcNameStr = pcName || '';
+  currentViewQuality = allScreensQuality;
+  viewMode = 'single';
+  watchStartTs = Date.now();
+  fpsCount = 0; lastFpsTs = Date.now();
+  document.getElementById('pcTitle').textContent = getDisplayName(pcId, pcName);
+  document.getElementById('fpsInfo').textContent = qualityLabel(currentViewQuality);
+  document.getElementById('allScreensPage').style.display = 'none';
+  document.getElementById('viewPage').style.display = 'flex';
+  clearScreen();
+  if (ws && ws.readyState === WebSocket.OPEN)
+    ws.send(JSON.stringify({action:'watch', pcId, quality: currentViewQuality, fps: allScreensFps}));
+}
+
+// ── 全屏监控列数选择 ─────────────────────────────────────────
+// 区分拖拽与点击（拖动超过 6px 则视为拖拽，不触发回调）
+function addClickWithDragGuard(el, callback){
+  let moved = false, sx = 0, sy = 0;
+  el.addEventListener('pointerdown', e => { moved = false; sx = e.clientX; sy = e.clientY; });
+  el.addEventListener('pointermove', e => {
+    if (Math.hypot(e.clientX - sx, e.clientY - sy) > 6) moved = true;
+  });
+  el.addEventListener('click', () => { if (!moved) callback(); });
+}
+function applyAllScreensCols(){
+  document.getElementById('allScreensGrid').style.gridTemplateColumns =
+    `repeat(${allScreensCols},1fr)`;
+  [1,2,3].forEach(n => {
+    document.getElementById('colBtn'+n).classList.toggle('active', n === allScreensCols);
+  });
+}
+function setAllScreensCols(n){
+  allScreensCols = n;
+  localStorage.setItem('allScreensCols', n);
+  applyAllScreensCols();
+}
+
+// ── 全屏监控：打开/启动/退出 ─────────────────────────────────
+function openAllScreens(){
+  const q = parseInt(localStorage.getItem('allScreensQualitySaved') || '30');
+  startAllScreens(q, 1);
+}
+
+function openAllScreensQualityChange(){
+  pendingMode   = 'all';
+  // 聚焦视图时记录对应 PC，使齿轮按钮可以打开该 PC 的设置
+  pendingPcId   = null;
+  pendingPcName = null;
+  const cnt = currentPcs.filter(p => p.Online !== false).length;
+  document.getElementById('qualityTitle').textContent = '切换画质 — 全屏监控';
+  document.getElementById('qualityPcName').textContent =
+    cnt ? `全部 ${cnt} 台在线 PC 同时推流` : '全屏监控模式';
+  document.getElementById('qualityMask').classList.add('show');
+  document.getElementById('qualityContent').style.display = 'block';
+  document.getElementById('settingsPanel').style.display  = 'none';
+  settingsOpen = false;
+  highlightQualityBtn(allScreensQuality); // 高亮当前画质
+}
+
+function startAllScreens(quality, fps){
+  localStorage.setItem('allScreensQualitySaved', quality);
+  allScreensQuality = quality;
+  allScreensFps     = fps;
+  watchAllStartTs   = Date.now();
+  viewMode = 'allscreens';
+  allScreensDismissedPcs.clear(); // 从主页重新进入，清空叉掉记录
+
+  document.getElementById('listPage').style.display       = 'none';
+  document.getElementById('viewPage').style.display       = 'none';
+  document.getElementById('allScreensPage').style.display = 'flex';
+  applyAllScreensCols(); // 应用记住的列数
+  document.getElementById('allScreensInfo').textContent   = qualityLabel(quality);
+
+  updateAllScreensList(currentPcs);
+
+  if (ws && ws.readyState === WebSocket.OPEN)
+    ws.send(JSON.stringify({action:'watchAll', quality, fps}));
+}
+
+// 从单PC聚焦返回全屏时恢复（保留叉掉记录，不重置）
+function _resumeAllScreens(){
+  watchAllStartTs = Date.now();
+  viewMode = 'allscreens';
+
+  document.getElementById('viewPage').style.display       = 'none';
+  document.getElementById('allScreensPage').style.display = 'flex';
+  applyAllScreensCols();
+  document.getElementById('allScreensInfo').textContent   = qualityLabel(allScreensQuality);
+
+  updateAllScreensList(currentPcs); // 已有叉掉过滤
+
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({action:'watchAll', quality: allScreensQuality, fps: allScreensFps}));
+    // 重新向服务器注册排除
+    allScreensDismissedPcs.forEach(pcId =>
+      ws.send(JSON.stringify({action:'excludePc', pcId}))
+    );
+  }
+}
+
+function exitAllScreens(){
+  if (ws && ws.readyState === WebSocket.OPEN)
+    ws.send(JSON.stringify({action:'unwatch'}));
+  _exitAllScreensLocal();
+}
+
+// 不发 unwatch（重连等场景）直接清理本地状态
+function _exitAllScreensLocal(){
+  viewMode = 'icon';
+  Object.keys(prevUrls).forEach(id => URL.revokeObjectURL(prevUrls[id]));
+  prevUrls = {};
+  allScreensFpsCounts = {};
+  allScreensFpsTs     = {};
+  document.getElementById('allScreensPage').style.display = 'none';
+  document.getElementById('listPage').style.display       = 'block';
+  document.getElementById('allScreensGrid').innerHTML     = '';
+  currentPcId = null;
+}
+
+function updateAllScreensList(pcs){
+  const raw = pcs.filter(p => p.Online !== false && !allScreensDismissedPcs.has(p.Id));
+  const onlinePcs = applyCardOrder(raw); // 与主页卡片排序一致
+  const grid = document.getElementById('allScreensGrid');
+  const existingIds = new Set(
+    [...grid.querySelectorAll('.pcScreenRow')].map(el => el.dataset.pcid)
+  );
+  const newIds = new Set(onlinePcs.map(p => p.Id));
+
+  // 移除已断开的 PC 行
+  existingIds.forEach(id => {
+    if (!newIds.has(id)){
+      const el = document.getElementById('pcrow_' + id);
+      if (el) el.remove();
+      if (prevUrls[id]){ URL.revokeObjectURL(prevUrls[id]); delete prevUrls[id]; }
+      delete allScreensFpsCounts[id];
+      delete allScreensFpsTs[id];
+    }
+  });
+
+  if (!onlinePcs.length){
+    if (!grid.querySelector('.pcScreenRow'))
+      grid.innerHTML = '<p class="emptyTip" style="padding:40px 0;text-align:center">暂无在线 PC</p>';
+    return;
+  }
+
+  // 添加新接入的在线 PC 行
+  onlinePcs.forEach(p => {
+    if (existingIds.has(p.Id)) return;
+    const displayName = getDisplayName(p.Id, p.Name);
+    const row = document.createElement('div');
+    row.className    = 'pcScreenRow';
+    row.dataset.pcid = p.Id;
+    row.id           = 'pcrow_' + p.Id;
+    row.innerHTML =
+      `<div class="pcScreenHeader">` +
+        `<span class="pcScreenName">${esc(displayName)}</span>` +
+        `<span class="pcScreenFps" id="pcfps_${esc(p.Id)}">-- fps</span>` +
+        `<button class="pcScreenDismiss" title="暂时隐藏此PC" onclick="dismissPcFromAllScreens(event,'${esc(p.Id)}')">✕</button>` +
+      `</div>` +
+      `<div class="pcScreenImgWrap">` +
+        `<img id="pcimg_${esc(p.Id)}" class="pcScreenImg" alt="${esc(displayName)}"/>` +
+        `<div id="pcnosig_${esc(p.Id)}" class="pcScreenNoSig">⏳ 等待画面...</div>` +
+      `</div>`;
+    grid.appendChild(row);
+    const wrap = row.querySelector('.pcScreenImgWrap');
+    const headerEl = row.querySelector('.pcScreenHeader');
+    const _pid = p.Id, _pname = p.Name;
+    addClickWithDragGuard(wrap, () => watchPcFromAllScreens(_pid, _pname));
+    headerEl.addEventListener('click', () => showAllScreensPcSettings(_pid, _pname));
+  });
+
+  // 按排序重排网格行
+  onlinePcs.forEach(p => {
+    const el = document.getElementById('pcrow_' + p.Id);
+    if (el) grid.appendChild(el);
+  });
+}
+
+function qualityLabel(q){
+  if(q<=30) return '🟢 省流';
+  if(q<=60) return '🟡 均衡';
+  if(q<=78) return '🔴 高清';
+  if(q<=88) return '⚪ 超清';
+  return '🔵 极清';
+}
+
+// ── 全屏监控：临时隐藏（叉掉）某台 PC ─────────────────────────
+function dismissPcFromAllScreens(e, pcId){
+  e.stopPropagation();
+  allScreensDismissedPcs.add(pcId); // 客户端记录叉掉状态
+  // 移除 DOM 卡片
+  const el = document.getElementById('pcrow_' + pcId);
+  if (el) el.remove();
+  // 释放 blob URL
+  if (prevUrls[pcId]){ URL.revokeObjectURL(prevUrls[pcId]); delete prevUrls[pcId]; }
+  delete allScreensFpsCounts[pcId];
+  delete allScreensFpsTs[pcId];
+  // 告知服务器停止推送该 PC
+  if (ws && ws.readyState === WebSocket.OPEN)
+    ws.send(JSON.stringify({action:'excludePc', pcId}));
+}
+
+function formatServerTime(ts){
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())} `
+       + `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+}
+function pad2(n){ return String(n).padStart(2,'0'); }
+
+// 逐字采样背景亮度，设置每个字符的颜色（一次性更新，不闪烁）
+function updateTimeColorPerChar(ts){
+  const img    = document.getElementById('screenImg');
+  const timeEl = document.getElementById('clientTimeOverlay');
+  // 远程控制进行中时不显示时间与版本号
+  if (remoteInputActive){
+    timeEl.style.display = 'none';
+    timeEl.innerHTML = '';
+    return;
+  }
+  const dateStr = formatServerTime(ts);
+  const verStr  = (currentPcId && pcVersions[currentPcId]) ? '客户端版本:' + pcVersions[currentPcId] : '';
+
+  if (!img.naturalWidth || !img.clientWidth){
+    timeEl.innerHTML = dateStr + (verStr ? '<br>' + esc(verStr) : '');
+    return;
+  }
+
+  // 将叠加层定位到图片右上角
+  repositionTimeOverlay();
+
+  if (!offCanvas){
+    offCanvas = document.createElement('canvas');
+    offCtx = offCanvas.getContext('2d', {willReadFrequently: true});
+  }
+
+  // 估算字符宽度（Courier New 11px ≈ 6.6px）
+  const charW_d = 6.6, charH_d = 14;
+  const rightPad_d = 10, topPad_d = 8;
+  const n = dateStr.length;
+  const totalW_d = charW_d * n;
+
+  // 映射到原图坐标
+  const scaleX = img.naturalWidth  / img.clientWidth;
+  const scaleY = img.naturalHeight / img.clientHeight;
+  const srcW = Math.ceil(totalW_d * scaleX);
+  const srcH = Math.ceil(charH_d  * scaleY);
+  const srcX = Math.max(0, img.naturalWidth  - Math.round((totalW_d + rightPad_d) * scaleX));
+  const srcY = Math.max(0, Math.round(topPad_d * scaleY));
+
+  offCanvas.width  = srcW || 1;
+  offCanvas.height = srcH || 1;
+  offCtx.drawImage(img, srcX, srcY, srcW, srcH, 0, 0, srcW, srcH);
+
+  let imgData;
+  try { imgData = offCtx.getImageData(0, 0, srcW, srcH); }
+  catch(e){ timeEl.innerHTML = dateStr + (verStr ? '<br>' + esc(verStr) : ''); return; }
+
+  const charSrcW = srcW / n;
+  let html = '<div style="white-space:nowrap">';
+  let totalBright = 0;
+  for (let i = 0; i < n; i++){
+    const x0 = Math.round(i * charSrcW);
+    const x1 = Math.min(srcW, Math.round((i + 1) * charSrcW));
+    let total = 0, cnt = 0;
+    for (let y = 0; y < srcH; y++){
+      for (let x = x0; x < x1; x++){
+        const idx = (y * srcW + x) * 4;
+        total += 0.299 * imgData.data[idx] + 0.587 * imgData.data[idx+1] + 0.114 * imgData.data[idx+2];
+        cnt++;
+      }
+    }
+    const bright = cnt ? total / cnt : 128;
+    totalBright += bright;
+    // 亮背景→黑字+白描边；暗背景→白字+黑描边
+    const [fg, sh] = bright > 140
+      ? ['#000', '0 0 3px #fff,0 0 5px #fff']
+      : ['#fff', '0 0 3px #000,0 0 5px #000'];
+    // 空格用 &nbsp; 防止被 HTML 压缩
+    const ch = dateStr[i] === ' ' ? '&nbsp;' : esc(dateStr[i]);
+    html += `<span style="color:${fg};text-shadow:${sh}">${ch}</span>`;
+  }
+  html += '</div>';
+  if (verStr) {
+    const avgBright = n ? totalBright / n : 128;
+    const [vfg, vsh] = avgBright > 140
+      ? ['#000', '0 0 3px #fff,0 0 5px #fff']
+      : ['#fff', '0 0 3px #000,0 0 5px #000'];
+    html += `<div style="white-space:nowrap;color:${vfg};text-shadow:${vsh}">${esc(verStr)}</div>`;
+  }
+  timeEl.innerHTML = html;
+}
+
+function repositionTimeOverlay(){
+  const img    = document.getElementById('screenImg');
+  const timeEl = document.getElementById('clientTimeOverlay');
+  const wrap   = document.getElementById('screenWrap');
+  if (!img || !timeEl || !wrap) return;
+  const ir = img.getBoundingClientRect();
+  const cr = wrap.getBoundingClientRect();
+  // 读取完所有尺寸再统一写入，避免回流抖动
+  const right = cr.right - ir.right + 8;
+  const top   = ir.top - cr.top + 0;
+  // 字体大小随图片显示宽度等比缩放（1% 宽度），与缩放保持同步
+  const fontSize = Math.max(5, ir.width / 100);
+  timeEl.style.right    = right + 'px';
+  timeEl.style.top      = top + 'px';
+  timeEl.style.fontSize = fontSize + 'px';
+}
+
+// ── 图像缩放：滚轮 / 双指捏合 / 拖拽平移 ─────────────────────
+let _activeDrag = null;
+window.addEventListener('mousemove', e => { if (_activeDrag) _activeDrag.move(e); });
+window.addEventListener('mouseup',   e => { if (_activeDrag) { _activeDrag.up(e); _activeDrag = null; } });
+
+function _tdist(a, b){ return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY); }
+function _tmid(a, b){ return {x:(a.clientX+b.clientX)/2, y:(a.clientY+b.clientY)/2}; }
+
+/**
+ * 为容器绑定图像缩放（滚轮/捏合缩放 + 拖拽平移）
+ * container : 接收事件的包裹元素（需 overflow:hidden）
+ * target    : 实际被 transform 的 <img>
+ * 返回 reset 函数，可随时调用恢复原始比例
+ */
+function makeImgZoomable(container, target, alwaysPannable=false, onTransform=null){
+  let sc=1, tx=0, ty=0;
+  let pinch=false, lastDist=0;
+  let tDrag=false, td_sx=0, td_sy=0, td_tx0=0, td_ty0=0;
+  let lastTap=0;
+
+  function apply(){
+    target.style.transformOrigin = '0 0';
+    const hasTx = tx !== 0 || ty !== 0;
+    target.style.transform = (sc===1 && !hasTx) ? '' : `translate(${tx}px,${ty}px) scale(${sc})`;
+    container.style.cursor = (alwaysPannable || sc>1 || hasTx) ? 'grab' : '';
+    if (onTransform) onTransform();
+  }
+
+function zoomAt(factor, cx, cy){
+    // 图像在容器中的自然布局偏移（flexbox 居中等产生的 ox/oy）
+    // visual_top_left = (ox + tx, oy + ty)，故 ox = ir.left - cr.left - tx
+    const ir = target.getBoundingClientRect();
+    const cr = container.getBoundingClientRect();
+    const ox = (ir.left - cr.left) - tx;
+    const oy = (ir.top  - cr.top)  - ty;
+    const ns = Math.max(1, Math.min(10, sc*factor));
+    const f  = ns/sc;
+    tx = (cx - ox)*(1-f) + tx*f;
+    ty = (cy - oy)*(1-f) + ty*f;
+    sc = ns;
+    if(sc<=1){ sc=1; tx=0; ty=0; }
+    apply();
+  }
+
+  function reset(){ sc=1; tx=0; ty=0; apply(); }
+
+  // 鼠标滚轮缩放
+  container.addEventListener('wheel', e=>{
+    e.preventDefault();
+    const r = container.getBoundingClientRect();
+    zoomAt(e.deltaY<0 ? 1.15 : 1/1.15, e.clientX-r.left, e.clientY-r.top);
+  }, {passive:false});
+
+  // 双击重置（非远程控制模式时有效）
+  container.addEventListener('dblclick', () => { if (!remoteInputActive) reset(); });
+
+  // 触摸：双指捏合缩放 + 单指拖拽平移（已缩放时） 
+  container.addEventListener('touchstart', e=>{
+    if(e.touches.length===2){
+      pinch=true; tDrag=false;
+      lastDist = _tdist(e.touches[0], e.touches[1]);
+      e.preventDefault(); // 阻止浏览器自身的页面缩放
+    } else if(e.touches.length===1){
+      const now = Date.now();
+      if(now - lastTap < 300){ reset(); lastTap=0; e.preventDefault(); return; }
+      lastTap = now;
+      if(alwaysPannable || sc > 1){
+        tDrag=true;
+        td_sx=e.touches[0].clientX; td_sy=e.touches[0].clientY;
+        td_tx0=tx; td_ty0=ty;
+        e.preventDefault(); // 已缩放或允许平移时单指拖拽，阻止页面滚动
+      }
+    }
+  }, {passive:false});
+
+  container.addEventListener('touchmove', e=>{
+    if(pinch && e.touches.length===2){
+      e.preventDefault();
+      const d = _tdist(e.touches[0], e.touches[1]);
+      const m = _tmid(e.touches[0], e.touches[1]);
+      const r = container.getBoundingClientRect();
+      zoomAt(d/lastDist, m.x-r.left, m.y-r.top);
+      lastDist = d;
+    } else if(tDrag && e.touches.length===1){
+      e.preventDefault();
+      tx = td_tx0 + (e.touches[0].clientX - td_sx);
+      ty = td_ty0 + (e.touches[0].clientY - td_sy);
+      apply();
+    }
+  }, {passive:false});
+
+  container.addEventListener('touchend', e=>{
+    if(e.touches.length < 2) pinch = false;
+    if(e.touches.length === 0) tDrag = false;
+  }, {passive:false});
+
+  // 鼠标拖拽平移（桌面端，已缩放时）
+  container.addEventListener('mousedown', e=>{
+    if((!alwaysPannable && sc<=1) || e.button!==0) return;
+    const sx=e.clientX, sy=e.clientY, tx0=tx, ty0=ty;
+    _activeDrag = {
+      move(ev){ tx=tx0+(ev.clientX-sx); ty=ty0+(ev.clientY-sy); apply(); },
+      up(){ apply(); }
+    };
+    container.style.cursor = 'grabbing';
+    e.preventDefault();
+  });
+
+  // 供外部（遥控 overlay）在拖拽交接时调用，接管桌面端鼠标平移
+  function startExternalDrag(sx, sy){
+    const tx0=tx, ty0=ty;
+    _activeDrag = {
+      move(ev){ tx=tx0+(ev.clientX-sx); ty=ty0+(ev.clientY-sy); apply(); },
+      up(){ container.style.cursor='grab'; apply(); }
+    };
+    container.style.cursor = 'grabbing';
+  }
+
+  // 供外部调用：触摸平移接管
+  function startExternalTouchPan(sx, sy){ tDrag=true; td_sx=sx; td_sy=sy; td_tx0=tx; td_ty0=ty; }
+  function handleExternalTouchMove(x, y){ if(!tDrag) return; tx=td_tx0+(x-td_sx); ty=td_ty0+(y-td_sy); apply(); }
+  function handleExternalTouchEnd(){ tDrag=false; apply(); }
+
+  return { reset, startExternalDrag, startExternalTouchPan, handleExternalTouchMove, handleExternalTouchEnd };
+}
+
+// ── PC 卡片拖拽排序 ──────────────────────────────────────────
+function initGridDnD(){
+  const grid = document.getElementById('pcGrid');
+  let dragEl=null, ghost=null, pressCard=null;
+  let startX=0, startY=0, ghostInitX=0, ghostInitY=0;
+  let pressTimer=null, capturedId=-1, dragging=false, suppressNextClick=false;
+
+  grid.addEventListener('pointerdown', e=>{
+    const card = e.target.closest('.pcCard');
+    if(!card || e.button>0) return;
+    startX=e.clientX; startY=e.clientY;
+    const pid=e.pointerId;
+    pressCard=card;
+    card.style.transition='transform .42s';
+    card.style.transform='scale(1.04)';
+    pressTimer = setTimeout(()=>{
+      pressTimer=null;
+      if(pressCard){ pressCard.style.transition=''; pressCard.style.transform=''; }
+      dragging=true; dragEl=card; capturedId=pid;
+      const r=card.getBoundingClientRect();
+      ghostInitX=r.left; ghostInitY=r.top;
+      ghost=card.cloneNode(true);
+      Object.assign(ghost.style,{
+        position:'fixed', left:r.left+'px', top:r.top+'px',
+        width:r.width+'px', height:r.height+'px', margin:'0',
+        opacity:'0.82', pointerEvents:'none', zIndex:'9999',
+        transform:'scale(1.06)', boxShadow:'0 10px 28px rgba(0,0,0,.8)',
+        transition:'transform .12s'
+      });
+      document.body.appendChild(ghost);
+      card.style.opacity='0.25';
+      try{ grid.setPointerCapture(pid); }catch(_){}
+    }, 420);
+  });
+
+  grid.addEventListener('pointermove', e=>{
+    if(pressTimer && Math.hypot(e.clientX-startX,e.clientY-startY)>8){
+      clearTimeout(pressTimer); pressTimer=null;
+      if(pressCard){ pressCard.style.transform=''; pressCard.style.transition=''; pressCard=null; }
+    }
+    if(!dragging||!ghost) return;
+    ghost.style.left=(ghostInitX+(e.clientX-startX))+'px';
+    ghost.style.top =(ghostInitY+(e.clientY-startY))+'px';
+    ghost.style.visibility='hidden';
+    const el=document.elementFromPoint(e.clientX,e.clientY);
+    ghost.style.visibility='';
+    const over=el&&el.closest('.pcCard[data-pcid]');
+    if(over&&over!==dragEl){
+      const cards=[...grid.querySelectorAll('.pcCard[data-pcid]')];
+      const si=cards.indexOf(dragEl), ti=cards.indexOf(over);
+      if(si>=0&&ti>=0){
+        if(si<ti) grid.insertBefore(dragEl,over.nextSibling);
+        else      grid.insertBefore(dragEl,over);
+      }
+    }
+  });
+
+  function endDrag(){
+    clearTimeout(pressTimer); pressTimer=null;
+    if(pressCard){ pressCard.style.transform=''; pressCard.style.transition=''; pressCard=null; }
+    if(!dragging){ return; }
+    dragging=false; suppressNextClick=true;
+    if(ghost){ ghost.remove(); ghost=null; }
+    if(dragEl){ dragEl.style.opacity=''; dragEl=null; }
+    const newOrder=[...grid.querySelectorAll('.pcCard[data-pcid]')].map(c=>c.dataset.pcid).filter(Boolean);
+    if(newOrder.length) saveCardOrder(newOrder);
+    setTimeout(()=>suppressNextClick=false, 80);
+  }
+
+  grid.addEventListener('pointerup', endDrag);
+  grid.addEventListener('pointercancel', endDrag);
+  // 拖拽结束后屏蔽一次 click，防止误触发卡片点击
+  grid.addEventListener('click', e=>{ if(suppressNextClick){ e.stopPropagation(); e.preventDefault(); } }, true);
+}
+
+initGridDnD();
+
+let _svZoomReset = null;
+let _svZoom = null;
+function initSingleViewZoom(){
+  _svZoom = makeImgZoomable(
+    document.getElementById('screenWrap'),
+    document.getElementById('screenImg'),
+    true, // 允许不缩放时也可平移
+    repositionTimeOverlay
+  );
+  _svZoomReset = _svZoom.reset;
+}
+initSingleViewZoom();
+
+// ── Escape 键退出单PC视频页 / 关闭弹窗 ──────────────────────
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Escape') return;
+  // 优先关闭质量选择 / 设置弹窗
+  if (document.getElementById('qualityMask').classList.contains('show')){
+    cancelQuality();
+    return;
+  }
+  if (document.getElementById('viewPage').style.display !== 'none'){
+    goBack();
+  }
+});
+
+// ── 远程输入模式 ─────────────────────────────────────────────────
+let remoteInputActive = false;
+let remoteClickMode   = 0;          // 0=左键,1=双击,2=右键,3=中键
+const remoteActiveMods = new Set(); // 'ctrl'|'alt'|'shift'|'win'
+
+function openRemoteInputMode(){
+  const pcId   = pendingPcId || currentPcId;
+  const pcName = pendingPcName || currentPcNameStr || '';
+  if (!pcId){ showToast('请先选择一台 PC'); return; }
+  cancelQuality();
+  if (viewMode !== 'single' || currentPcId !== pcId){
+    if (viewMode === 'allscreens'){
+      if (ws && ws.readyState === WebSocket.OPEN)
+        ws.send(JSON.stringify({action:'unwatch'}));
+      prevPage = 'allscreens';
+    }
+    currentPcId       = pcId;
+    currentPcNameStr  = pcName;
+    currentViewQuality = 60;
+    viewMode           = 'single';
+    watchStartTs       = Date.now();
+    fpsCount = 0; lastFpsTs = Date.now();
+    document.getElementById('pcTitle').textContent   = getDisplayName(pcId, pcName);
+    document.getElementById('fpsInfo').textContent   = qualityLabel(currentViewQuality);
+    document.getElementById('listPage').style.display      = 'none';
+    document.getElementById('allScreensPage').style.display= 'none';
+    document.getElementById('viewPage').style.display      = 'flex';
+    clearScreen();
+    if (ws && ws.readyState === WebSocket.OPEN)
+      ws.send(JSON.stringify({action:'watch', pcId, quality:60, fps:1}));
+  }
+  enableRemoteInput();
+}
+
+function enableRemoteInput(){
+  remoteInputActive = true;
+  document.getElementById('remoteInputBar').style.display = 'flex';
+  // 远程控制中隐藏时间与版本号
+  const tOverlay = document.getElementById('clientTimeOverlay');
+  tOverlay.style.display = 'none';
+  tOverlay.innerHTML = '';
+  _updateRemoteOverlay();
+}
+
+function closeRemoteInput(){
+  remoteInputActive = false;
+  document.getElementById('remoteInputBar').style.display = 'none';
+  document.getElementById('remoteClickOverlay').style.display = 'none';
+  remoteActiveMods.clear();
+  _updateModBtns();
+  remoteDragMode = false;
+  const dragBtn = document.getElementById('ribDragBtn');
+  if (dragBtn) { dragBtn.classList.remove('on'); dragBtn.blur(); }
+}
+
+function _updateRemoteOverlay(){
+  if (!remoteInputActive){ closeRemoteInput(); return; }
+  const inSingle = document.getElementById('viewPage').style.display !== 'none';
+  if (!inSingle){ closeRemoteInput(); return; }
+  document.getElementById('remoteClickOverlay').style.display = 'block';
+}
+
+function setClickMode(n){
+  remoteClickMode = n;
+  for (let i = 0; i < 4; i++)
+    document.getElementById('rim' + i).classList.toggle('on', i === n);
+}
+
+function toggleMod(k){
+  const id = 'mod' + k.charAt(0).toUpperCase() + k.slice(1);
+  if (remoteActiveMods.has(k)) remoteActiveMods.delete(k);
+  else                          remoteActiveMods.add(k);
+  document.getElementById(id)?.classList.toggle('mod-on', remoteActiveMods.has(k));
+}
+
+function _updateModBtns(){
+  ['ctrl','alt','shift','win'].forEach(k => {
+    const id = 'mod' + k.charAt(0).toUpperCase() + k.slice(1);
+    document.getElementById(id)?.classList.toggle('mod-on', remoteActiveMods.has(k));
+  });
+}
+
+function _remoteTargetPcId(){
+  return currentPcId;
+}
+
+function _sendRemote(obj){
+  const pcId = _remoteTargetPcId();
+  if (!pcId){ showToast('未选择 PC'); return; }
+  if (!ws || ws.readyState !== WebSocket.OPEN){ showToast('未连接'); return; }
+  ws.send(JSON.stringify({action:'control', pcId, ...obj}));
+}
+
+  // 从遮罩的客户端坐标计算归一化坐标并发送点击
+function _handleRemoteClick(clientX, clientY){
+  const imgEl = document.getElementById('screenImg');
+  if (!imgEl || imgEl.style.display === 'none') return;
+  const r = imgEl.getBoundingClientRect();
+  if (r.width === 0 || r.height === 0) return;
+  const nx = Math.max(0, Math.min(1, (clientX - r.left) / r.width));
+  const ny = Math.max(0, Math.min(1, (clientY - r.top)  / r.height));
+  _sendRemote({cmd:'mouse_input', x:nx, y:ny, type:remoteClickMode, mods:[...remoteActiveMods]});
+  // 双击/右键/中键发送一次后自动回到左键模式
+  if (remoteClickMode !== 0) setClickMode(0);
+}
+
+function _getRemoteNorm(clientX, clientY){
+  const imgEl = document.getElementById('screenImg');
+  if (!imgEl || imgEl.style.display === 'none') return null;
+  const r = imgEl.getBoundingClientRect();
+  if (r.width === 0 || r.height === 0) return null;
+  return {
+    nx: Math.max(0, Math.min(1, (clientX - r.left) / r.width)),
+    ny: Math.max(0, Math.min(1, (clientY - r.top)  / r.height))
+  };
+}
+
+function sendScrollCmd(delta){
+  _sendRemote({cmd:'mouse_scroll', x:0.5, y:0.5, delta});
+}
+
+// 快捷键 → 组合发送（带当前激活修饰键）
+const _ctrlCombos = {copy:'c',paste:'v',cut:'x',selectall:'a',undo:'z',redo:'y'};
+const _winCombos  = {desktop:'d',run:'r'};
+
+function sendKeyCmd(key){
+  const mods = [...remoteActiveMods];
+  if (_ctrlCombos[key])
+    _sendRemote({cmd:'key_input', key:_ctrlCombos[key], mods:[...new Set([...mods,'ctrl'])]});
+  else if (_winCombos[key])
+    _sendRemote({cmd:'key_input', key:_winCombos[key], mods:[...new Set([...mods,'win'])]});
+  else if (key === 'close')
+    _sendRemote({cmd:'key_input', key:'f4', mods:[...new Set([...mods,'alt'])]});
+  else if (key === 'taskman')
+    _sendRemote({cmd:'key_input', key:'esc', mods:[...new Set([...mods,'ctrl','shift'])]});
+  else if (key === 'ime')
+    _sendRemote({cmd:'key_input', key:'space', mods:[...new Set([...mods,'ctrl'])]});
+  else
+    _sendRemote({cmd:'key_input', key, mods});
+}
+
+function sendTextCmd(){
+  const inp  = document.getElementById('remoteTextInput');
+  const text = inp.value;
+  if (!text) return;
+  _sendRemote({cmd:'text_input', text});
+  inp.value = '';
+}
+
+// 远程拖拽模式开关（false=拖拽平移画面，true=拖拽发远程拖拽指令）
+let remoteDragMode = false;
+function toggleRemoteDragMode(){
+  remoteDragMode = !remoteDragMode;
+  const btn = document.getElementById('ribDragBtn');
+  if (btn){
+    btn.classList.toggle('on', remoteDragMode);
+    if (!remoteDragMode) btn.blur();
+  }
+}
+
+// ── 遮罩事件绑定 ────────────────────────────────────────────────
+(function initRemoteOverlays(){
+  const DRAG_THRESHOLD = 8;  // px：超过此位移才进入拖拽/平移模式
+  const DRAG_THROTTLE  = 40; // ms：远程拖拽 mouse_move 最小发送间隔
+
+  function bindOverlay(el){
+    let lastTouchEndTs = 0;
+
+    // ── 桌面鼠标 ──────────────────────────────────────────────
+    let mouseIsDown = false, mouseDragging = false;
+    let mouseSX = 0, mouseSY = 0, lastMoveSendTs = 0;
+
+    el.addEventListener('mousedown', e => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation(); // 阻止冒泡到 screenWrap，避免 zoom 平移处理器抢先设置 _activeDrag
+      mouseIsDown   = true;
+      mouseDragging = false;
+      mouseSX = e.clientX;
+      mouseSY = e.clientY;
+    });
+
+    el.addEventListener('mousemove', e => {
+      if (!mouseIsDown) return;
+      const dx = e.clientX - mouseSX, dy = e.clientY - mouseSY;
+      if (!mouseDragging && Math.hypot(dx, dy) > DRAG_THRESHOLD) {
+        mouseDragging = true;
+        mouseIsDown   = false; // 本遮罩停止追踪，交给对应处理器
+        if (remoteDragMode) {
+          // 发送远程按下，后续由 window.mousemove 代理的 _activeDrag 不存在，
+          // 改用全局标志继续由下方 window 监听器推进
+          const c = _getRemoteNorm(mouseSX, mouseSY);
+          if (c) _sendRemote({cmd:'mouse_down', x:c.nx, y:c.ny, button:0});
+          // 设置全局 _activeDrag 接管后续 mousemove/mouseup
+          _activeDrag = {
+            move(ev){
+              const now = Date.now();
+              if (now - lastMoveSendTs >= DRAG_THROTTLE){
+                lastMoveSendTs = now;
+                const c2 = _getRemoteNorm(ev.clientX, ev.clientY);
+                if (c2) _sendRemote({cmd:'mouse_move', x:c2.nx, y:c2.ny});
+              }
+            },
+            up(ev){
+              const c2 = _getRemoteNorm(ev.clientX, ev.clientY);
+              if (c2) _sendRemote({cmd:'mouse_up', x:c2.nx, y:c2.ny, button:0});
+            }
+          };
+        } else {
+          // 交给图像平移（screenWrap zoom 控制器）
+          if (_svZoom) _svZoom.startExternalDrag(mouseSX, mouseSY);
+        }
+      }
+    });
+
+    el.addEventListener('mouseup', e => {
+      if (!mouseIsDown) return; // 已被 drag 接管
+      mouseIsDown = false;
+      // 未超过拖拽阈值 → 当作点击
+      if (Date.now() - lastTouchEndTs >= 600)
+        _handleRemoteClick(e.clientX, e.clientY);
+    });
+
+    // ── 触摸 ──────────────────────────────────────────────────
+    let touchSX = 0, touchSY = 0, touchMoved = false;
+    let touchHandedOff = false, wasMulti = false;
+
+    el.addEventListener('touchstart', e => {
+      e.preventDefault();
+      if (e.touches.length >= 2) { wasMulti = true; touchMoved = true; return; }
+      e.stopPropagation(); // 单指才阻止冒泡，双指捏合仍传到 screenWrap zoom 处理器
+      if (wasMulti) return;
+      touchSX       = e.touches[0].clientX;
+      touchSY       = e.touches[0].clientY;
+      touchMoved    = false;
+      touchHandedOff = false;
+      lastMoveSendTs = 0;
+    }, {passive:false});
+
+    el.addEventListener('touchmove', e => {
+      e.preventDefault();
+      if (e.touches.length >= 2) { wasMulti = true; touchMoved = true; return; }
+      e.stopPropagation(); // 单指才阻止冒泡，双指捏合仍传到 screenWrap zoom 处理器
+      if (wasMulti) return;
+      const cx = e.touches[0].clientX, cy = e.touches[0].clientY;
+      const dist = Math.hypot(cx - touchSX, cy - touchSY);
+      if (dist > DRAG_THRESHOLD) touchMoved = true;
+      if (!touchHandedOff && dist > DRAG_THRESHOLD) {
+        touchHandedOff = true;
+        if (remoteDragMode) {
+          const c = _getRemoteNorm(touchSX, touchSY);
+          if (c) _sendRemote({cmd:'mouse_down', x:c.nx, y:c.ny, button:0});
+        } else {
+          if (_svZoom) _svZoom.startExternalTouchPan(touchSX, touchSY);
+        }
+      }
+      if (touchHandedOff) {
+        if (remoteDragMode) {
+          const now = Date.now();
+          if (now - lastMoveSendTs >= DRAG_THROTTLE) {
+            lastMoveSendTs = now;
+            const c = _getRemoteNorm(cx, cy);
+            if (c) _sendRemote({cmd:'mouse_move', x:c.nx, y:c.ny});
+          }
+        } else {
+          if (_svZoom) _svZoom.handleExternalTouchMove(cx, cy);
+        }
+      }
+    }, {passive:false});
+
+    el.addEventListener('touchend', e => {
+      e.preventDefault();
+      lastTouchEndTs = Date.now();
+      if (touchHandedOff) {
+        if (remoteDragMode) {
+          const t = e.changedTouches[0];
+          const c = _getRemoteNorm(t.clientX, t.clientY);
+          if (c) _sendRemote({cmd:'mouse_up', x:c.nx, y:c.ny, button:0});
+        } else {
+          if (_svZoom) _svZoom.handleExternalTouchEnd();
+        }
+      } else if (!touchMoved && !wasMulti && e.changedTouches.length === 1) {
+        _handleRemoteClick(e.changedTouches[0].clientX, e.changedTouches[0].clientY);
+      }
+      if (e.touches.length === 0) { wasMulti = false; touchMoved = false; }
+    }, {passive:false});
+  }
+
+  bindOverlay(document.getElementById('remoteClickOverlay'));
+
+  // 文字输入框回车发送
+  document.getElementById('remoteTextInput').addEventListener('keydown', e => {
+    if (e.key === 'Enter'){ e.preventDefault(); sendTextCmd(); }
+  });
+})();
+
+connect();
+</script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- 无控制台窗口，后台静默运行 -->
+    <OutputType>WinExe</OutputType>
+    <AssemblyName>PCMonitorServer</AssemblyName>
+  </PropertyGroup>
+</Project>

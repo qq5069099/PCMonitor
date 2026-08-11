@@ -1,0 +1,9 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<!-- https://go.microsoft.com/fwlink/?LinkID=208121. -->
+<Project>
+  <PropertyGroup>
+    <_PublishTargetUrl>C:\Users\50690\Desktop\game5\PCMonitor\Server\bin\Release\net8.0-windows\publish\</_PublishTargetUrl>
+    <History>True|2026-07-12T02:06:21.6641523Z||;True|2026-07-12T10:01:26.4712395+08:00||;True|2026-06-24T09:00:03.0610677+08:00||;True|2026-06-24T08:33:46.2432465+08:00||;True|2026-05-27T14:54:25.8821736+08:00||;True|2026-05-27T14:54:09.0350252+08:00||;True|2026-05-27T10:05:17.4230589+08:00||;False|2026-05-27T10:05:02.1416216+08:00||;True|2026-05-27T09:33:39.6892324+08:00||;True|2026-05-18T08:27:44.1924726+08:00||;</History>
+    <LastFailureDetails />
+  </PropertyGroup>
+</Project>

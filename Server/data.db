@@ -1,0 +1,33 @@
+﻿{
+  "pc_WANGQU-030": {
+    "name": "WANGQU-030",
+    "locked": false,
+    "remark": "小燕子"
+  },
+  "pc_WANGQU-050": {
+    "name": "WANGQU-050",
+    "locked": false,
+    "remark": "小陈"
+  },
+  "pc_WANGQU-007": {
+    "name": "WANGQU-007",
+    "locked": false,
+    "remark": "小苏"
+  },
+  "pc_WANGQU-DABAO": {
+    "name": "WANGQU-DABAO",
+    "locked": false,
+    "remark": "打包电脑"
+  },
+  "pc_WANGQU-001": {
+    "name": "WANGQU-001",
+    "locked": false,
+    "remark": "张工"
+  },
+  "pc_DESKTOP-IDI77BS": {
+    "name": "DESKTOP-IDI77BS",
+    "locked": false,
+    "remark": "家里",
+    "scheduleLock": "23:30-07:00"
+  }
+}

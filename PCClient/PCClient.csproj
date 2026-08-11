@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker">
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- 无控制台窗口，后台静默运行 -->
+    <OutputType>WinExe</OutputType>
+    <!-- 引用 Windows Forms 以使用 Screen.AllScreens 和 System.Drawing -->
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>PCMonitorClient</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- 提供 IHostedService / BackgroundService / ILogger 等基础设施 -->
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="8.0.0" />
+  </ItemGroup>
+
+</Project>
