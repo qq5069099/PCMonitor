@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0,user-scalable=no"/>
+  <title>PC 远程监控</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0;user-select:none}
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+         background:#111125;color:#eef;min-height:100vh;
+         display:flex;align-items:center;justify-content:center}
+    .loginBox{width:100%;max-width:340px;padding:34px 28px;
+              background:#1a1a34;border:1px solid #262650;border-radius:14px;
+              text-align:center;margin:16px}
+    .loginBox h1{font-size:20px;color:#5cf0b8;margin-bottom:6px}
+    .loginBox .sub{font-size:12px;color:#778;margin-bottom:26px}
+    .field{width:100%;background:#111125;border:1px solid #262650;color:#eef;
+           padding:11px 14px;border-radius:8px;font-size:14px;margin-bottom:14px;
+           outline:none;transition:border-color .15s}
+    .field:focus{border-color:#5cf0b8}
+    .field::placeholder{color:#556}
+    .btn{width:100%;padding:12px 0;border:none;border-radius:8px;
+         background:#0e2a1e;border:1px solid #5cf0b8;color:#5cf0b8;
+         font-size:15px;font-weight:600;cursor:pointer;
+         transition:background .15s,color .15s}
+    .btn:hover,.btn:active{background:#5cf0b8;color:#06281c}
+    .btn:disabled{opacity:.5;cursor:default}
+    .err{color:#f07060;font-size:13px;min-height:20px;margin-top:4px}
+    .tip{color:#556;font-size:11px;margin-top:16px}
+    .rememberRow{display:flex;align-items:center;justify-content:center;
+                 gap:6px;margin:-4px 0 14px;cursor:pointer;user-select:none}
+    .rememberRow input{accent-color:#5cf0b8;width:15px;height:15px;cursor:pointer}
+    .rememberRow span{font-size:12px;color:#99a}
+  </style>
+</head>
+<body>
+  <div class="loginBox">
+    <h1>💻 PC 远程监控</h1>
+    <div class="sub">请输入账号登录</div>
+    <input class="field" id="username" type="text" placeholder="账号" autocomplete="username"/>
+    <input class="field" id="password" type="password" placeholder="密码" autocomplete="current-password"/>
+    <label class="rememberRow">
+      <input type="checkbox" id="remember" checked/>
+      <span>记住密码，下次自动登录</span>
+    </label>
+    <button class="btn" id="btnLogin">登 录</button>
+    <div class="err" id="err"></div>
+    <div class="tip">账号由管理员在 data.db 中配置</div>
+  </div>
+  <script>
+    "use strict";
+    const uEl = document.getElementById('username');
+    const pEl = document.getElementById('password');
+    const rEl = document.getElementById('remember');
+    const bEl = document.getElementById('btnLogin');
+    const eEl = document.getElementById('err');
+
+    // 自动登录失败（如服务器修改密码）时回到登录页，提示并回填账号
+    const msg = new URLSearchParams(location.search).get('msg');
+    if (msg === 'autologin_failed') setErr('登录已过期或密码已修改，请重新登录');
+
+    // 自动回填账号密码：优先取服务器 remember cookie 中的账号密码，其次取本地记忆的账号
+    async function fillUsername(){
+      try{
+        const res = await fetch('/api/remembered-user', {credentials:'same-origin'});
+        const data = await res.json().catch(()=>({}));
+        if (res.ok && data.ok){
+          if (data.username) uEl.value = data.username;
+          if (data.password){
+            pEl.value = data.password;
+            rEl.checked = true; // 记住密码已生效
+          } else {
+            pEl.focus();
+          }
+        } else {
+          uEl.value = localStorage.getItem('pcm_login_user') || '';
+        }
+      }catch(e){
+        uEl.value = localStorage.getItem('pcm_login_user') || '';
+      }
+    }
+    fillUsername();
+
+    function setErr(msg){ eEl.textContent = msg || ''; }
+
+    async function doLogin(){
+      const username = uEl.value.trim();
+      const password = pEl.value;
+      if (!username || !password){ setErr('请输入账号和密码'); return; }
+      bEl.disabled = true;
+      bEl.textContent = '登录中...';
+      setErr('');
+      try{
+        const res = await fetch('/api/login', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({username, password})
+        });
+        const data = await res.json().catch(()=>({}));
+        if (res.ok && data.ok){
+          // 记住账号，便于下次输入
+          localStorage.setItem('pcm_login_user', username);
+          // 登录成功，跳转到主页
+          location.href = '/';
+          return;
+        }
+        setErr(data.error || '登录失败');
+        // 登录失败，清空密码并停留在登录页
+        pEl.value = '';
+        uEl.focus();
+      }catch(e){
+        setErr('网络错误，请重试');
+      }finally{
+        bEl.disabled = false;
+        bEl.textContent = '登 录';
+      }
+    }
+
+    bEl.addEventListener('click', doLogin);
+    pEl.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+    uEl.addEventListener('keydown', e => { if (e.key === 'Enter') pEl.focus(); });
+    uEl.focus();
+  </script>
+</body>
+</html>

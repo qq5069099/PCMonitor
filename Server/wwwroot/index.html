@@ -345,6 +345,45 @@
 <script>
 "use strict";
 let ws, currentPcId = null, reconnTimer = null;
+
+// ── 登录会话校验 ──────────────────────────────────────────────
+// 若会话无效则跳回登录页（防止绕过登录直接访问）
+let myUsername = '';
+let allowedPcIds = null; // null = 可看所有 PC；数组 = 仅可看列表内的 PC
+
+async function checkAuth(){
+  try{
+    const res = await fetch('/api/me', {credentials:'same-origin'});
+    const data = await res.json().catch(()=>({}));
+    if (res.ok && data.ok){
+      myUsername = data.username || '';
+      if (res.headers.get('x-allowed-pcs')){
+        try{
+          const arr = JSON.parse(res.headers.get('x-allowed-pcs'));
+          allowedPcIds = Array.isArray(arr) ? arr : null;
+        }catch(e){ allowedPcIds = null; }
+      }
+      // 顶部显示当前登录用户
+      if (myUsername){
+        const b = document.getElementById('badge');
+        b.style.marginRight = '4px';
+      }
+      return true;
+    }
+  }catch(e){ /* 网络异常，按未登录处理 */ }
+  location.href = '/login.html';
+  return false;
+}
+
+function logout(){
+  fetch('/api/logout', {method:'POST', credentials:'same-origin'})
+    .finally(() => { location.href = '/login.html'; });
+}
+
+// 前端过滤：仅展示当前用户有权观察的 PC（与服务端 pcList 过滤保持一致）
+function canViewPc(pcId){
+  return allowedPcIds === null || allowedPcIds.includes(pcId);
+}
 let autoOpenedAllScreens = false; // 首次加载时自动进入全屏监控
 let fpsCount = 0, lastFpsTs = Date.now();
 let watchStartTs = 0; // 发出 watch 命令时的本地时间戳，用于过滤过期帧
@@ -414,6 +453,8 @@ function connect(){
     } else {
       const msg = JSON.parse(data);
       if (msg.type === 'pcList') {
+        // 服务端已按登录用户权限过滤，此处再做一道本地过滤（避免残留数据绕过）
+        msg.pcs = (msg.pcs || []).filter(p => canViewPc(p.Id));
         renderPcList(msg.pcs);
         if (viewMode === 'allscreens') updateAllScreensList(msg.pcs);
         else if (viewMode === 'single' && currentPcId) {
@@ -1710,7 +1751,8 @@ function toggleRemoteDragMode(){
   });
 })();
 
-connect();
+// 先校验登录会话，未登录跳转登录页；已登录才建立 WebSocket 连接
+checkAuth().then(ok => { if (ok) connect(); });
 </script>
 </body>
 </html>

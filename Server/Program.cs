@@ -10,31 +10,251 @@ Utility.EnsureInStartup();
 var builder = WebApplication.CreateBuilder(args);
 var app = builder.Build();
 
-app.UseDefaultFiles();
-var _ctp = new Microsoft.AspNetCore.StaticFiles.FileExtensionContentTypeProvider();
-_ctp.Mappings[".exe"] = "application/octet-stream";
-app.UseStaticFiles(new StaticFileOptions { ContentTypeProvider = _ctp });
-app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(20) });
-
 // ─── 全局状态 ─────────────────────────────────────────────────
 // 所有已知 PC（在线 + 离线），key = pcId
 var pcs = new ConcurrentDictionary<string, PCObject>();
 var viewerClients = new ConcurrentDictionary<string, ViewerEntry>();
 var db = new TextDB(Path.Combine(AppContext.BaseDirectory, "data.db"));
 
-// 启动时从 TextDB 恢复 PC 列表及锁定状态
-foreach (var key in db.Keys.Where(k => k.StartsWith("pc_")))
+// ─── data.db 结构迁移：旧版顶层 pc_xxx 键 → pcs 子对象 ──────
+if (db.GetObject("pcs") == null)
 {
-    var id = key[3..];
-    if (string.IsNullOrEmpty(id)) continue;
-    var obj = db.GetObject(key);
-    var name = obj?["name"]?.GetValue<string>() ?? "";
-    var locked = obj?["locked"]?.GetValue<bool>() ?? false;
-    var remark = obj?["remark"]?.GetValue<string>() ?? "";
-    var scheduleLock = obj?["scheduleLock"]?.GetValue<string>() ?? "";
-    pcs[id] = new PCObject { Id = id, Name = name, Locked = locked, Remark = remark, ScheduleLock = scheduleLock };
+    var legacyPcs = db.Keys.Where(k => k.StartsWith("pc_")).ToArray();
+    if (legacyPcs.Length > 0)
+    {
+        var pcsObj = new JsonObject();
+        foreach (var key in legacyPcs)
+        {
+            pcsObj[key[3..]] = db.Get(key)?.DeepClone();
+            db.Remove(key);
+        }
+        db.Set("pcs", pcsObj);
+        Console.WriteLine($"[DB] 已迁移旧版 PC 数据 {legacyPcs.Length} 条到 pcs 子对象");
+    }
+    else
+    {
+        db.Set("pcs", new JsonObject());
+    }
 }
+
+// 启动时从 TextDB 恢复 PC 列表及锁定状态
+// 兼容处理：pcs 子对象内的 key 若带 "pc_" 前缀则自动去掉（与用户权限列表保持一致）
+var pcsData = db.GetObject("pcs");
+bool pcsKeyNormalized = false;
+if (pcsData != null)
+{
+    var keys = pcsData.Select(kv => kv.Key).ToArray();
+    foreach (var key in keys)
+    {
+        if (!key.StartsWith("pc_")) continue;
+        if (pcsData[key] is not JsonObject obj) continue;
+        pcsData.Remove(key);
+        pcsData[key[3..]] = obj;
+        pcsKeyNormalized = true;
+    }
+    if (pcsKeyNormalized) db.Set("pcs", pcsData);
+
+    foreach (var kv in pcsData)
+    {
+        if (kv.Value is not JsonObject obj) continue;
+        var id = kv.Key;
+        if (string.IsNullOrEmpty(id)) continue;
+        var name = obj["name"]?.GetValue<string>() ?? "";
+        var locked = obj["locked"]?.GetValue<bool>() ?? false;
+        var remark = obj["remark"]?.GetValue<string>() ?? "";
+        var scheduleLock = obj["scheduleLock"]?.GetValue<string>() ?? "";
+        pcs[id] = new PCObject { Id = id, Name = name, Locked = locked, Remark = remark, ScheduleLock = scheduleLock };
+    }
+}
+if (pcsKeyNormalized) Console.WriteLine("[DB] 已去除 pcs 子对象中 pc_ 前缀");
 Console.WriteLine($"[DB] 恢复已知 PC {pcs.Count} 台，锁定 {pcs.Values.Count(p => p.Locked)} 台");
+
+// ─── 用户配置（登录账号）─────────────────────────────────────
+// 结构: users 子对象，每个账号可配置可观察的 PC 列表（pcs 数组），空数组 = 所有 PC
+var users = new Dictionary<string, UserConfig>(StringComparer.OrdinalIgnoreCase);
+var usersData = db.GetObject("users");
+if (usersData != null)
+{
+    foreach (var kv in usersData)
+    {
+        if (kv.Value is not JsonObject obj) continue;
+        var password = obj["password"]?.GetValue<string>() ?? "";
+        HashSet<string>? allowed = null;
+        if (obj["pcs"] is JsonArray arr && arr.Count > 0)
+            allowed = arr.Select(x => x?.GetValue<string>() ?? "").Where(s => !string.IsNullOrEmpty(s)).ToHashSet();
+        users[kv.Key] = new UserConfig { Username = kv.Key, Password = password, AllowedPcIds = allowed };
+    }
+}
+if (users.Count == 0)
+{
+    users["admin"] = new UserConfig { Username = "admin", Password = "admin123", AllowedPcIds = null };
+    db.Set("users", new JsonObject
+    {
+        ["admin"] = new JsonObject { ["password"] = "admin123", ["pcs"] = new JsonArray() }
+    });
+    Console.WriteLine("[DB] 未配置任何登录用户，已创建默认账号 admin / admin123，请尽快在 data.db 修改！");
+}
+
+// ─── 登录会话 ────────────────────────────────────────────────
+// 支持同一账号多处同时登录：每次登录生成独立 token，互不挤下线
+var sessions = new ConcurrentDictionary<string, ViewerSession>();
+
+bool TryGetSession(HttpContext ctx, out ViewerSession session)
+{
+    if (ctx.Request.Cookies.TryGetValue("pcm_token", out var token)
+        && sessions.TryGetValue(token, out var s) && s != null)
+    {
+        session = s;
+        return true;
+    }
+    session = null!;
+    return false;
+}
+
+// 永久记住密码：从 remember cookie 中还原账号密码，若与 data.db 当前配置一致
+// 则自动重建会话（服务器修改密码后自动登录将失败，从而回到登录页）
+bool TryAutoLogin(HttpContext ctx, out ViewerSession session)
+{
+    session = null!;
+    if (!ctx.Request.Cookies.TryGetValue("pcm_remember", out var remember)) return false;
+    try
+    {
+        var decoded = Encoding.UTF8.GetString(Convert.FromBase64String(remember));
+        var sep = decoded.IndexOf('\n');
+        if (sep <= 0) return false;
+        var username = decoded[..sep];
+        var password = decoded[(sep + 1)..];
+        // 密码必须与 data.db 当前配置完全一致才允许自动登录
+        if (!users.TryGetValue(username, out var user) || user.Password != password) return false;
+        var token = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
+        session = new ViewerSession { Username = username, AllowedPcIds = user.AllowedPcIds };
+        sessions[token] = session;
+        // 重新下发会话 cookie，后续请求直接用会话，不必每次重建
+        ctx.Response.Cookies.Append("pcm_token", token, new CookieOptions
+        {
+            HttpOnly = true,
+            SameSite = SameSiteMode.Lax,
+            Expires = DateTimeOffset.UtcNow.AddDays(30)
+        });
+        return true;
+    }
+    catch { return false; }
+}
+
+// 无需登录即可访问的路径（PCClient 更新 / 登录页 / 登录接口）
+bool IsPublicPath(HttpContext ctx)
+{
+    var path = ctx.Request.Path.Value ?? "";
+    if (path is "/login.html" or "/login" or "/update/check" or "/PCMonitorClient.exe" or "/api/login" or "/api/remembered-user") return true;
+    if (path == "/ws" && ctx.Request.Query["role"].ToString() == "pc") return true;
+    return false;
+}
+
+// WebSocket 中间件需先注册，认证中间件才能正确识别 WebSocket 请求
+app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(20) });
+
+// ─── 认证中间件：未登录用户无法访问任何页面 / API / viewer WebSocket ──
+// 1. 已有有效会话 → 通过
+// 2. 无会话但记住的密码仍与 data.db 一致 → 自动重建会话通过（永久记住密码）
+// 3. 否则拦截：页面跳登录页，API 返回 401，viewer WebSocket 拒绝
+app.Use(async (ctx, next) =>
+{
+    if (IsPublicPath(ctx)) { await next(); return; }
+    if (TryGetSession(ctx, out _) || TryAutoLogin(ctx, out _)) { await next(); return; }
+    if (ctx.WebSockets.IsWebSocketRequest) { ctx.Response.StatusCode = 401; return; }
+    if ((ctx.Request.Path.Value ?? "").StartsWith("/api/"))
+    {
+        ctx.Response.StatusCode = 401;
+        await ctx.Response.WriteAsJsonAsync(new { ok = false, error = "未登录" });
+        return;
+    }
+    // 已记住密码但自动登录失败（如服务器修改了密码）→ 登录页提示重新登录
+    if (ctx.Request.Cookies.ContainsKey("pcm_remember"))
+        ctx.Response.Redirect("/login.html?msg=autologin_failed");
+    else
+        ctx.Response.Redirect("/login.html");
+});
+
+// 登录
+app.MapPost("/api/login", async (HttpContext ctx) =>
+{
+    try
+    {
+        using var doc = await JsonDocument.ParseAsync(ctx.Request.Body);
+        var root = doc.RootElement;
+        var username = root.TryGetProperty("username", out var u) ? u.GetString() ?? "" : "";
+        var password = root.TryGetProperty("password", out var p) ? p.GetString() ?? "" : "";
+        if (!users.TryGetValue(username, out var user) || user.Password != password)
+        {
+            ctx.Response.StatusCode = 401;
+            await ctx.Response.WriteAsJsonAsync(new { ok = false, error = "账号或密码错误" });
+            return;
+        }
+        var token = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
+        sessions[token] = new ViewerSession { Username = username, AllowedPcIds = user.AllowedPcIds };
+        ctx.Response.Cookies.Append("pcm_token", token, new CookieOptions
+        {
+            HttpOnly = true,
+            SameSite = SameSiteMode.Lax,
+            Expires = DateTimeOffset.UtcNow.AddDays(30)
+        });
+        // 永久记住密码：10 年有效，之后打开直接自动登录，无需再输密码
+        ctx.Response.Cookies.Append("pcm_remember",
+            Convert.ToBase64String(Encoding.UTF8.GetBytes($"{username}\n{password}")),
+            new CookieOptions
+            {
+                HttpOnly = true,
+                SameSite = SameSiteMode.Lax,
+                Expires = DateTimeOffset.UtcNow.AddYears(10)
+            });
+        await ctx.Response.WriteAsJsonAsync(new { ok = true, username });
+    }
+    catch (JsonException) { ctx.Response.StatusCode = 400; await ctx.Response.WriteAsJsonAsync(new { ok = false, error = "请求格式错误" }); }
+});
+
+// 登录页回填账号密码：读取 remember cookie 中记住的账号与密码，供登录页自动回填
+app.MapGet("/api/remembered-user", (HttpContext ctx) =>
+{
+    if (ctx.Request.Cookies.TryGetValue("pcm_remember", out var remember))
+    {
+        try
+        {
+            var decoded = Encoding.UTF8.GetString(Convert.FromBase64String(remember));
+            var sep = decoded.IndexOf('\n');
+            if (sep > 0)
+                return Results.Json(new { ok = true, username = decoded[..sep], password = decoded[(sep + 1)..] });
+        }
+        catch { }
+    }
+    return Results.Json(new { ok = false });
+});
+
+// 退出登录：仅退出当前会话，保留记住的密码（下次仍自动登录）
+// 若要彻底忘记密码，可在浏览器中清除 pcm_remember cookie
+app.MapPost("/api/logout", (HttpContext ctx) =>
+{
+    if (ctx.Request.Cookies.TryGetValue("pcm_token", out var token)) sessions.TryRemove(token, out _);
+    ctx.Response.Cookies.Delete("pcm_token");
+    return Results.Json(new { ok = true });
+});
+
+// 当前登录用户
+app.MapGet("/api/me", (HttpContext ctx) =>
+{
+    if (TryGetSession(ctx, out var s))
+    {
+        // 通过响应头告知前端该用户可观察的 PC 列表（null = 所有 PC）
+        if (s.AllowedPcIds != null)
+            ctx.Response.Headers["x-allowed-pcs"] = JsonSerializer.Serialize(s.AllowedPcIds);
+        return Results.Json(new { ok = true, username = s.Username });
+    }
+    return Results.Json(new { ok = false }, statusCode: 401);
+});
+
+app.UseDefaultFiles();
+var _ctp = new Microsoft.AspNetCore.StaticFiles.FileExtensionContentTypeProvider();
+_ctp.Mappings[".exe"] = "application/octet-stream";
+app.UseStaticFiles(new StaticFileOptions { ContentTypeProvider = _ctp });
 
 // ─── 自动更新：计算客户端 exe 的 MD5 ──────────────────────────
 var clientExePath = Path.Combine(AppContext.BaseDirectory, "wwwroot", "PCMonitorClient.exe");
@@ -57,7 +277,16 @@ app.Map("/ws", async (HttpContext ctx) =>
     var ws = await ctx.WebSockets.AcceptWebSocketAsync();
 
     if (role == "pc") await HandlePcAsync(ws);
-    else if (role == "viewer") await HandleViewerAsync(ws);
+    else if (role == "viewer")
+    {
+        // viewer 必须已登录（认证中间件已校验），此处取得会话用于权限过滤
+        if (!TryGetSession(ctx, out var session))
+        {
+            await ws.CloseAsync(WebSocketCloseStatus.PolicyViolation, "unauthorized", default);
+            return;
+        }
+        await HandleViewerAsync(ws, session);
+    }
     else await ws.CloseAsync(WebSocketCloseStatus.PolicyViolation, "unknown role", default);
 });
 
@@ -204,10 +433,10 @@ async Task HandlePcAsync(WebSocket ws)
 // ═══════════════════════════════════════════════════════════════
 // 浏览器端连接处理
 // ═══════════════════════════════════════════════════════════════
-async Task HandleViewerAsync(WebSocket ws)
+async Task HandleViewerAsync(WebSocket ws, ViewerSession session)
 {
     var viewerId = Guid.NewGuid().ToString("N")[..8];
-    var viewer = new ViewerEntry { Id = viewerId, Socket = ws };
+    var viewer = new ViewerEntry { Id = viewerId, Socket = ws, AllowedPcIds = session.AllowedPcIds };
     viewerClients[viewerId] = viewer;
     Console.WriteLine($"[+] 观看者连接: {viewerId}");
 
@@ -230,6 +459,7 @@ async Task HandleViewerAsync(WebSocket ws)
             if (action == "watch")
             {
                 var newPcId = doc.RootElement.GetProperty("pcId").GetString()!;
+                if (!CanAccessPc(viewer, newPcId)) continue; // 无权限的 PC 直接忽略
                 // 停止所有当前观看，切换到单 PC 模式
                 var oldIds = viewer.WatchingPcIds.ToArray();
                 viewer.WatchingPcIds.Clear();
@@ -257,7 +487,7 @@ async Task HandleViewerAsync(WebSocket ws)
                 viewer.IsWatchingAll = true;
                 viewer.ExcludedPcIds.Clear(); // 重新进入全屏模式时清除临时排除列表
 
-                foreach (var p in pcs.Values.Where(p => p.IsOnline))
+                foreach (var p in pcs.Values.Where(p => p.IsOnline && CanAccessPc(viewer, p.Id)))
                 {
                     viewer.WatchingPcIds.Add(p.Id);
                     await NotifyPcStartAsync(p.Id, quality, fps);
@@ -275,6 +505,7 @@ async Task HandleViewerAsync(WebSocket ws)
                 var targetPcId = doc.RootElement.TryGetProperty("pcId", out var pidProp) ? pidProp.GetString() : null;
                 var ctrlCmd = doc.RootElement.TryGetProperty("cmd", out var cmdProp) ? cmdProp.GetString() : null;
                 if (!string.IsNullOrEmpty(targetPcId) && !string.IsNullOrEmpty(ctrlCmd)
+                    && CanAccessPc(viewer, targetPcId)
                     && pcs.TryGetValue(targetPcId, out var target))
                 {
                     if (ctrlCmd == "lock_input")
@@ -308,7 +539,8 @@ async Task HandleViewerAsync(WebSocket ws)
             {
                 var targetPcId = doc.RootElement.TryGetProperty("pcId", out var rpidProp) ? rpidProp.GetString() : null;
                 var remark = doc.RootElement.TryGetProperty("remark", out var remProp) ? remProp.GetString() ?? "" : "";
-                if (!string.IsNullOrEmpty(targetPcId) && pcs.TryGetValue(targetPcId, out var remTarget))
+                if (!string.IsNullOrEmpty(targetPcId) && CanAccessPc(viewer, targetPcId)
+                    && pcs.TryGetValue(targetPcId, out var remTarget))
                 {
                     remTarget.Remark = remark;
                     SavePc(remTarget);
@@ -320,7 +552,8 @@ async Task HandleViewerAsync(WebSocket ws)
                 // 设置或清除定时锁定时段，格式 "HH:mm-HH:mm"（可跨越0点），空字符串表示取消
                 var targetPcId = doc.RootElement.TryGetProperty("pcId", out var slPidProp) ? slPidProp.GetString() : null;
                 var scheduleLock = doc.RootElement.TryGetProperty("scheduleLock", out var slProp) ? slProp.GetString() ?? "" : "";
-                if (!string.IsNullOrEmpty(targetPcId) && pcs.TryGetValue(targetPcId, out var slTarget))
+                if (!string.IsNullOrEmpty(targetPcId) && CanAccessPc(viewer, targetPcId)
+                    && pcs.TryGetValue(targetPcId, out var slTarget))
                 {
                     slTarget.ScheduleLock = scheduleLock;
                     SavePc(slTarget);
@@ -343,13 +576,15 @@ async Task HandleViewerAsync(WebSocket ws)
 // ─── 辅助函数 ─────────────────────────────────────────────────
 void SavePc(PCObject pc)
 {
-    db.Set("pc_" + pc.Id, new JsonObject
+    var pcsObj = db.GetObject("pcs") ?? new JsonObject();
+    pcsObj[pc.Id] = new JsonObject
     {
         ["name"] = JsonValue.Create(pc.Name),
         ["locked"] = JsonValue.Create(pc.Locked),
         ["remark"] = JsonValue.Create(pc.Remark),
         ["scheduleLock"] = JsonValue.Create(pc.ScheduleLock)
-    });
+    };
+    db.Set("pcs", pcsObj);
 }
 
 bool IsInScheduleLock(string scheduleLock)
@@ -363,6 +598,10 @@ bool IsInScheduleLock(string scheduleLock)
     // 跨越0点时（如 23:30-07:00），now >= start 或 now < end 均为锁定时段
     return start <= end ? now >= start && now < end : now >= start || now < end;
 }
+
+// 判断某 viewer 是否有权观察指定 PC（AllowedPcIds 为 null 表示所有 PC）
+bool CanAccessPc(ViewerEntry viewer, string pcId)
+    => viewer.AllowedPcIds == null || viewer.AllowedPcIds.Contains(pcId);
 
 async Task CheckAndStopAsync(string pcId)
 {
@@ -415,8 +654,11 @@ async Task BroadcastPcListAsync()
 
 async Task SendPcListAsync(ViewerEntry viewer)
 {
-    // 合并已知 PC（在线 + 离线），在线排前
-    var list = pcs.Values
+    // 合并已知 PC（在线 + 离线），在线排前；按用户权限过滤可观察的 PC
+    IEnumerable<PCObject> allowedPcs = pcs.Values;
+    if (viewer.AllowedPcIds != null)
+        allowedPcs = allowedPcs.Where(p => viewer.AllowedPcIds.Contains(p.Id));
+    var list = allowedPcs
         .Select(p => new { p.Id, p.Name, p.Remark, Online = p.IsOnline, p.Locked, p.Version, p.ScheduleLock })
         .OrderByDescending(p => p.Online)
         .ThenBy(p => p.Name)
@@ -485,10 +727,26 @@ class ViewerEntry
 {
     public string Id { get; init; } = "";
     public WebSocket Socket { get; init; } = null!;
+    public HashSet<string>? AllowedPcIds { get; init; } = null; // null = 可看所有 PC
     public HashSet<string> WatchingPcIds { get; } = new();
     public HashSet<string> ExcludedPcIds { get; } = new();
     public bool IsWatchingAll { get; set; } = false;
     public int Quality { get; set; } = 55;
     public int Fps { get; set; } = 2;
     public SemaphoreSlim SendLock { get; } = new(1, 1);
+}
+
+// 登录会话（服务端内存态，重启后需重新登录）
+class ViewerSession
+{
+    public string Username { get; init; } = "";
+    public HashSet<string>? AllowedPcIds { get; init; } = null; // null = 所有 PC
+}
+
+// data.db 中 users 子对象里每个账号的配置
+class UserConfig
+{
+    public string Username { get; init; } = "";
+    public string Password { get; init; } = "";
+    public HashSet<string>? AllowedPcIds { get; init; } = null; // null = 所有 PC
 }
