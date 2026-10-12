@@ -1,8 +1,10 @@
 using System.Collections.Concurrent;
+using System.Globalization;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Microsoft.Extensions.FileProviders;
 
 // 启动时确保已加入 Windows 启动组（注册表 Run 键）
 Utility.EnsureInStartup();
@@ -63,7 +65,10 @@ if (pcsData != null)
         var locked = obj["locked"]?.GetValue<bool>() ?? false;
         var remark = obj["remark"]?.GetValue<string>() ?? "";
         var scheduleLock = obj["scheduleLock"]?.GetValue<string>() ?? "";
-        pcs[id] = new PCObject { Id = id, Name = name, Locked = locked, Remark = remark, ScheduleLock = scheduleLock };
+        // 定时截图上传开关：老数据没有该键 → 默认 false（不上传）
+        var screenshotUpload = obj["screenshotUpload"]?.GetValue<bool>() ?? false;
+        var screenshotMaxKB = NormalizeShotMaxKB(obj["screenshotMaxKB"]?.GetValue<int>() ?? 300);
+        pcs[id] = new PCObject { Id = id, Name = name, Locked = locked, Remark = remark, ScheduleLock = scheduleLock, ScreenshotUpload = screenshotUpload, ScreenshotMaxKB = screenshotMaxKB };
     }
 }
 if (pcsKeyNormalized) Console.WriteLine("[DB] 已去除 pcs 子对象中 pc_ 前缀");
@@ -147,6 +152,8 @@ bool IsPublicPath(HttpContext ctx)
     var path = ctx.Request.Path.Value ?? "";
     if (path is "/login.html" or "/login" or "/update/check" or "/PCMonitorClient.exe" or "/api/login" or "/api/remembered-user") return true;
     if (path == "/ws" && ctx.Request.Query["role"].ToString() == "pc") return true;
+    // 定时截图：PC 端未登录，查询开关 / 上传截图两个接口对外开放
+    if (path is "/api/screenshot/config" or "/api/screenshot/upload") return true;
     return false;
 }
 
@@ -256,6 +263,19 @@ var _ctp = new Microsoft.AspNetCore.StaticFiles.FileExtensionContentTypeProvider
 _ctp.Mappings[".exe"] = "application/octet-stream";
 app.UseStaticFiles(new StaticFileOptions { ContentTypeProvider = _ctp });
 
+// ─── 定时截图归档：目录与静态访问 ──────────────────────────────
+// 磁盘结构: screenshots/{pcId}-{yyyy-MM-dd}/{HHmmss}.jpg（目录/文件名本身即时间排序键）
+// 通过 /shots/{目录}/{文件} 访问，位于认证中间件之后 → 必须登录才能看图
+var screenshotRoot = Path.Combine(AppContext.BaseDirectory, "screenshots");
+Directory.CreateDirectory(screenshotRoot);
+var retentionDays = app.Configuration.GetValue("ScreenshotRetentionDays", 14);
+const int MaxScreenshotBytes = 4 * 1024 * 1024; // 单张截图上传体积上限（防滥用，非业务限制）
+app.UseStaticFiles(new StaticFileOptions
+{
+    FileProvider = new PhysicalFileProvider(screenshotRoot),
+    RequestPath = "/shots"
+});
+
 // ─── 自动更新：计算客户端 exe 的 MD5 ──────────────────────────
 var clientExePath = Path.Combine(AppContext.BaseDirectory, "wwwroot", "PCMonitorClient.exe");
 var clientMd5 = File.Exists(clientExePath) ? Utility.Md5File(Path.Combine(AppContext.BaseDirectory, "wwwroot", "PCMonitorClient.exe")) : "";
@@ -266,6 +286,176 @@ app.MapGet("/update/check", (HttpContext ctx) =>
         md5 = clientMd5,
         url = string.IsNullOrEmpty(clientMd5) ? "" : $"{ctx.Request.Scheme}://{ctx.Request.Host}/PCMonitorClient.exe"
     });
+});
+
+// ─── 定时截图归档：接口 ────────────────────────────────────────
+// PC 端未登录，故「查询开关 / 上传截图」两个接口对外开放（见 IsPublicPath）
+// 上传接口只接受 data.db 中已存在的 pcId + 4MB 体积上限，避免任意名称在磁盘建目录
+
+app.MapGet("/api/screenshot/config", (HttpContext ctx) =>
+{
+    var pcId = SanitizePcId(ctx.Request.Query["pcId"].ToString());
+    var pc = pcId.Length > 0 && pcs.TryGetValue(pcId, out var found) ? found : null;
+    return Results.Json(new
+    {
+        enabled = pc?.ScreenshotUpload ?? false,
+        maxKB = pc?.ScreenshotMaxKB ?? 300 // 单张截图体积上限（KB）
+    });
+});
+
+app.MapPost("/api/screenshot/upload", async (HttpContext ctx) =>
+{
+    var pcId = SanitizePcId(ctx.Request.Query["pcId"].ToString());
+    if (pcId.Length == 0)
+    {
+        ctx.Response.StatusCode = 400;
+        await ctx.Response.WriteAsJsonAsync(new { ok = false, error = "pcId 非法" });
+        return;
+    }
+    if (!pcs.ContainsKey(pcId))
+    {
+        ctx.Response.StatusCode = 404;
+        await ctx.Response.WriteAsJsonAsync(new { ok = false, error = "未知 PC" });
+        return;
+    }
+    if (ctx.Request.ContentLength.HasValue && ctx.Request.ContentLength.Value > MaxScreenshotBytes)
+    {
+        ctx.Response.StatusCode = 413;
+        await ctx.Response.WriteAsJsonAsync(new { ok = false, error = "图片过大" });
+        return;
+    }
+
+    // 手工读取并限制大小（请求体即裸 JPEG 字节）
+    using var ms = new MemoryStream();
+    var buf = new byte[81920];
+    int read;
+    while ((read = await ctx.Request.Body.ReadAsync(buf)) > 0)
+    {
+        if (ms.Length + read > MaxScreenshotBytes)
+        {
+            ctx.Response.StatusCode = 413;
+            await ctx.Response.WriteAsJsonAsync(new { ok = false, error = "图片过大" });
+            return;
+        }
+        ms.Write(buf, 0, read);
+    }
+    if (ms.Length == 0)
+    {
+        ctx.Response.StatusCode = 400;
+        await ctx.Response.WriteAsJsonAsync(new { ok = false, error = "空请求体" });
+        return;
+    }
+
+    // 目录/文件名用服务器本地时间，同一秒重复上传只保留最后一张
+    var now = DateTime.Now;
+    var date = now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+    var name = now.ToString("HHmmss", CultureInfo.InvariantCulture) + ".jpg";
+    var dir = Path.Combine(screenshotRoot, $"{pcId}-{date}");
+    try
+    {
+        Directory.CreateDirectory(dir);
+        await File.WriteAllBytesAsync(Path.Combine(dir, name), ms.ToArray());
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[截图] 保存失败 {pcId}: {ex.Message}");
+        ctx.Response.StatusCode = 500;
+        await ctx.Response.WriteAsJsonAsync(new { ok = false, error = "保存失败" });
+        return;
+    }
+    Console.WriteLine($"[截图] {pcId} {date} {name} ({ms.Length} 字节)");
+    await ctx.Response.WriteAsJsonAsync(new { ok = true, file = $"{pcId}-{date}/{name}", bytes = ms.Length });
+});
+
+// 列出某台 PC 的截图（需登录 + 有该 PC 的观察权限）；date 省略时取最新一天
+app.MapGet("/api/screenshots", (HttpContext ctx) =>
+{
+    if (!TryGetSession(ctx, out var session)) return Results.Json(new { ok = false, error = "未登录" }, statusCode: 401);
+    var pcId = SanitizePcId(ctx.Request.Query["pcId"].ToString());
+    if (pcId.Length == 0) return Results.Json(new { ok = false, error = "pcId 非法" }, statusCode: 400);
+    if (session.AllowedPcIds != null && !session.AllowedPcIds.Contains(pcId))
+        return Results.Json(new { ok = false, error = "无权访问" }, statusCode: 403);
+
+    var dates = ListShotDates(pcId);
+    var reqDate = ctx.Request.Query["date"].ToString();
+    var date = IsShotDate(reqDate) && dates.Contains(reqDate) ? reqDate : (dates.Count > 0 ? dates[0] : "");
+
+    var shots = new List<object>();
+    if (date.Length > 0)
+    {
+        var dir = Path.Combine(screenshotRoot, $"{pcId}-{date}");
+        if (Directory.Exists(dir))
+        {
+            // 正序（按时间从早到晚），页面按时间顺序展示
+            foreach (var f in Directory.EnumerateFiles(dir, "*.jpg").OrderBy(f => Path.GetFileName(f)))
+            {
+                var fi = new FileInfo(f);
+                shots.Add(new { name = fi.Name, size = fi.Length, url = $"/shots/{pcId}-{date}/{fi.Name}" });
+            }
+        }
+    }
+    return Results.Json(new { ok = true, pcId, dates, date, shots });
+});
+
+// 手动删除：带 name 删单张；仅带 date 删当天；都不带则删该机全部
+app.MapDelete("/api/screenshots", (HttpContext ctx) =>
+{
+    if (!TryGetSession(ctx, out var session)) return Results.Json(new { ok = false, error = "未登录" }, statusCode: 401);
+    var pcId = SanitizePcId(ctx.Request.Query["pcId"].ToString());
+    if (pcId.Length == 0) return Results.Json(new { ok = false, error = "pcId 非法" }, statusCode: 400);
+    if (session.AllowedPcIds != null && !session.AllowedPcIds.Contains(pcId))
+        return Results.Json(new { ok = false, error = "无权访问" }, statusCode: 403);
+
+    var date = ctx.Request.Query["date"].ToString();
+    var name = ctx.Request.Query["name"].ToString();
+    var deleted = 0;
+
+    if (IsShotDate(date))
+    {
+        var dir = Path.Combine(screenshotRoot, $"{pcId}-{date}");
+        if (name.Length > 0)
+        {
+            if (!IsShotName(name)) return Results.Json(new { ok = false, error = "文件名非法" }, statusCode: 400);
+            var file = Path.Combine(dir, name);
+            if (File.Exists(file)) { File.Delete(file); deleted = 1; }
+        }
+        else deleted = DeleteShotDir(dir);
+    }
+    else if (date.Length == 0 && name.Length == 0)
+    {
+        foreach (var d in ListShotDates(pcId))
+            deleted += DeleteShotDir(Path.Combine(screenshotRoot, $"{pcId}-{d}"));
+    }
+    else return Results.Json(new { ok = false, error = "日期非法" }, statusCode: 400);
+
+    Console.WriteLine($"[截图] 已删除 {pcId} 的 {deleted} 张截图");
+    return Results.Json(new { ok = true, deleted });
+});
+
+// ─── 定时截图归档：过期清理（保留 ScreenshotRetentionDays 天，默认 14 天）──
+_ = Task.Run(async () =>
+{
+    while (true)
+    {
+        try
+        {
+            var cutoff = DateTime.Now.Date.AddDays(-retentionDays);
+            foreach (var dir in Directory.EnumerateDirectories(screenshotRoot))
+            {
+                var dirName = Path.GetFileName(dir);
+                // 目录名必须以 -yyyy-MM-dd 结尾才按保留期判定，不认识的目录一律不动
+                if (dirName.Length <= 11 || dirName[^11] != '-') continue;
+                var datePart = dirName[^10..];
+                if (!DateTime.TryParseExact(datePart, "yyyy-MM-dd", CultureInfo.InvariantCulture,
+                        DateTimeStyles.None, out var d)) continue;
+                if (d >= cutoff) continue;
+                var n = DeleteShotDir(dir);
+                Console.WriteLine($"[截图] 清理过期目录 {dirName}（{n} 张）");
+            }
+        }
+        catch (Exception ex) { Console.WriteLine($"[截图] 清理任务异常: {ex.Message}"); }
+        await Task.Delay(TimeSpan.FromMinutes(30));
+    }
 });
 
 // ─── WebSocket 入口 ──────────────────────────────────────────
@@ -560,6 +750,21 @@ async Task HandleViewerAsync(WebSocket ws, ViewerSession session)
                     await BroadcastPcListAsync();
                 }
             }
+            else if (action == "setScreenshotUpload")
+            {
+                // 定时截图上传配置：开关（默认关闭）+ 单张体积上限（KB 档位）
+                var targetPcId = doc.RootElement.TryGetProperty("pcId", out var suPidProp) ? suPidProp.GetString() : null;
+                var enabled = doc.RootElement.TryGetProperty("enabled", out var suProp) && suProp.ValueKind == JsonValueKind.True;
+                if (!string.IsNullOrEmpty(targetPcId) && CanAccessPc(viewer, targetPcId)
+                    && pcs.TryGetValue(targetPcId, out var suTarget))
+                {
+                    suTarget.ScreenshotUpload = enabled;
+                    if (doc.RootElement.TryGetProperty("maxKB", out var kbProp) && kbProp.TryGetInt32(out var kb))
+                        suTarget.ScreenshotMaxKB = NormalizeShotMaxKB(kb);
+                    SavePc(suTarget);
+                    await BroadcastPcListAsync();
+                }
+            }
         }
     }
     catch { }
@@ -582,7 +787,9 @@ void SavePc(PCObject pc)
         ["name"] = JsonValue.Create(pc.Name),
         ["locked"] = JsonValue.Create(pc.Locked),
         ["remark"] = JsonValue.Create(pc.Remark),
-        ["scheduleLock"] = JsonValue.Create(pc.ScheduleLock)
+        ["scheduleLock"] = JsonValue.Create(pc.ScheduleLock),
+        ["screenshotUpload"] = JsonValue.Create(pc.ScreenshotUpload),
+        ["screenshotMaxKB"] = JsonValue.Create(pc.ScreenshotMaxKB)
     };
     db.Set("pcs", pcsObj);
 }
@@ -597,6 +804,56 @@ bool IsInScheduleLock(string scheduleLock)
     var now = DateTime.Now.TimeOfDay;
     // 跨越0点时（如 23:30-07:00），now >= start 或 now < end 均为锁定时段
     return start <= end ? now >= start && now < end : now >= start || now < end;
+}
+
+// ─── 截图归档辅助 ──────────────────────────────────────────────
+// 清洗 pcId 作为路径段：只保留字母数字与 . _ -，拒绝空值 / ".." / 纯点，防止路径穿越
+string SanitizePcId(string raw)
+{
+    if (string.IsNullOrWhiteSpace(raw)) return "";
+    var sb = new StringBuilder();
+    foreach (var ch in raw)
+        if (char.IsLetterOrDigit(ch) || ch is '-' or '_' or '.') sb.Append(ch);
+    var s = sb.ToString();
+    if (s.Length == 0 || s.Contains("..") || s.Trim('.').Length == 0) return "";
+    return s.Length > 64 ? s[..64] : s; // 路径段长度保护
+}
+
+bool IsShotDate(string s) => System.Text.RegularExpressions.Regex.IsMatch(s ?? "", @"^\d{4}-\d{2}-\d{2}$");
+bool IsShotName(string s) => System.Text.RegularExpressions.Regex.IsMatch(s ?? "", @"^\d{6}\.jpg$");
+
+// 单张截图体积档位（KB），与前端"勾选一项"的选项保持一致；其它值一律回落默认 300
+int NormalizeShotMaxKB(int kb) => kb is 100 or 200 or 300 or 500 or 800 ? kb : 300;
+
+// 列出该 PC 已有截图的日期（倒序，最新在前）
+List<string> ListShotDates(string pcId)
+{
+    var list = new List<string>();
+    if (!Directory.Exists(screenshotRoot)) return list;
+    var prefix = pcId + "-";
+    foreach (var dir in Directory.EnumerateDirectories(screenshotRoot, prefix + "*"))
+    {
+        var dirName = Path.GetFileName(dir);
+        if (!dirName.StartsWith(prefix, StringComparison.Ordinal)) continue;
+        var d = dirName[prefix.Length..];
+        if (IsShotDate(d)) list.Add(d);
+    }
+    list.Sort((a, b) => string.CompareOrdinal(b, a));
+    return list;
+}
+
+// 删除整个日期目录，返回删除的文件数
+int DeleteShotDir(string dir)
+{
+    if (!Directory.Exists(dir)) return 0;
+    var n = 0;
+    try
+    {
+        foreach (var f in Directory.EnumerateFiles(dir)) { File.Delete(f); n++; }
+        Directory.Delete(dir, true);
+    }
+    catch (Exception ex) { Console.WriteLine($"[截图] 删除目录失败 {dir}: {ex.Message}"); }
+    return n;
 }
 
 // 判断某 viewer 是否有权观察指定 PC（AllowedPcIds 为 null 表示所有 PC）
@@ -659,7 +916,7 @@ async Task SendPcListAsync(ViewerEntry viewer)
     if (viewer.AllowedPcIds != null)
         allowedPcs = allowedPcs.Where(p => viewer.AllowedPcIds.Contains(p.Id));
     var list = allowedPcs
-        .Select(p => new { p.Id, p.Name, p.Remark, Online = p.IsOnline, p.Locked, p.Version, p.ScheduleLock })
+        .Select(p => new { p.Id, p.Name, p.Remark, Online = p.IsOnline, p.Locked, p.Version, p.ScheduleLock, p.ScreenshotUpload, p.ScreenshotMaxKB })
         .OrderByDescending(p => p.Online)
         .ThenBy(p => p.Name)
         .ToList();
@@ -718,6 +975,8 @@ class PCObject
     public string Version { get; set; } = "";
     public bool Locked { get; set; } = false;
     public string ScheduleLock { get; set; } = ""; // 定时锁定时段，格式 "HH:mm-HH:mm"，可跨越0点
+    public bool ScreenshotUpload { get; set; } = false; // 是否每 5 分钟上传定时截图（默认关闭）
+    public int ScreenshotMaxKB { get; set; } = 300; // 单张截图体积上限（KB），档位 100/200/300/500/800
     public bool IsLockActive { get; set; } = false; // 当前是否处于定时锁定状态
     public WebSocket? Socket { get; set; } = null;
     public bool IsOnline => Socket is { State: WebSocketState.Open };

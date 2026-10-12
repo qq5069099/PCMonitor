@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Net.Http.Headers;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
@@ -10,17 +11,27 @@ public sealed class Worker : BackgroundService
 {
     // ═══════════════ 配置（直接修改这里）═══════════════
     private const string DefaultServerUrl = "ws://fjwqgame.com:999/ws";
-    private const string Version = "v1.0.7";
+    private const string Version = "v1.0.8.1";
 
     private const int DefaultFps = 5;
     private const int DefaultJpegQuality = 55;
     private const int MaxWidthPerScreen = 960;
+
+    // 定时截图归档默认参数（可在 appsettings.json 中覆盖）
+    private const int DefaultScreenshotMaxWidth = 1600;  // 每屏像素宽（多屏仍拼成一张图）
+    private const int DefaultScreenshotQuality = 50;     // JPEG 起始质量
+    private const int DefaultScreenshotMaxBytes = 300 * 1024; // 单张（含双屏拼接）不超过 300KB
+    private const int DefaultScreenshotIntervalMinutes = 5;
     // ════════════════════════════════════════════════════
 
     private readonly ILogger<Worker> _log;
     private readonly string _serverUrl;
     private readonly string _employeeUrl;
     private readonly string[] _workPeriods;
+    private readonly int _screenshotMaxWidth;
+    private readonly int _screenshotQuality;
+    private readonly int _screenshotMaxBytes;
+    private readonly int _screenshotIntervalMinutes;
     private volatile bool _streaming;
     private volatile int _quality = DefaultJpegQuality;
     private volatile int _interval = 1000 / DefaultFps;
@@ -28,15 +39,30 @@ public sealed class Worker : BackgroundService
     private DateTime _lastControlTime = DateTime.MinValue;
     private int _updating = 0; // 0=空闲 1=更新中
 
+    // 截图上传 / 更新检查共用的 HTTP 客户端（静态复用，避免每次 new）
+    private static readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(30) };
+
     public Worker(ILogger<Worker> log, IConfiguration configuration)
     {
         _log = log;
         _serverUrl = configuration["ServerUrl"] ?? DefaultServerUrl;
         _employeeUrl = configuration["EmployeeUrl"] ?? "";
         _workPeriods = configuration.GetSection("WorkPeriods").Get<string[]>() ?? Array.Empty<string>();
+        _screenshotMaxWidth = Math.Clamp(configuration.GetValue("ScreenshotMaxWidth", DefaultScreenshotMaxWidth), 320, 3840);
+        _screenshotQuality = Math.Clamp(configuration.GetValue("ScreenshotQuality", DefaultScreenshotQuality), 1, 100);
+        _screenshotMaxBytes = Math.Clamp(configuration.GetValue("ScreenshotMaxBytes", DefaultScreenshotMaxBytes), 30 * 1024, 4 * 1024 * 1024);
+        _screenshotIntervalMinutes = Math.Clamp(configuration.GetValue("ScreenshotIntervalMinutes", DefaultScreenshotIntervalMinutes), 1, 60);
     }
 
     protected override async Task ExecuteAsync(CancellationToken ct)
+    {
+        // 两条长期任务并行：WebSocket 实时推流（含断线重连） + 定时截图归档
+        // 归档循环独立于连接状态，断线重连不影响整点上传节奏
+        await Task.WhenAll(RunConnectionLoopAsync(ct), RunScreenshotLoopAsync(ct));
+    }
+
+    // ─── 连接循环：断线每 5 秒重连 ────────────────────────────
+    private async Task RunConnectionLoopAsync(CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
         {
@@ -48,6 +74,103 @@ public sealed class Worker : BackgroundService
                 try { await Task.Delay(5_000, ct); } catch (OperationCanceledException) { break; }
             }
         }
+    }
+
+    // ─── 定时截图归档 ────────────────────────────────────────────
+    // 在"分钟数 % 间隔 == 0"的整分时刻触发（默认每 5 分钟 → :00 :05 :10 …），
+    // 仅工作时间段内执行，且需服务器端已为该机开启上传开关（默认关闭）
+    private async Task RunScreenshotLoopAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                var wait = DelayToNextShotMoment();
+                if (wait > TimeSpan.Zero) await Task.Delay(wait, ct);
+                await TryUploadScreenshotAsync(ct);
+            }
+            catch (OperationCanceledException) { break; }
+            catch (Exception ex) { _log.LogWarning("定时截图异常: {Msg}", ex.Message); }
+        }
+    }
+
+    // 距离下一个整分（分钟数能被间隔整除）的等待时长；每轮重新计算，免疫系统时间调整
+    private TimeSpan DelayToNextShotMoment()
+    {
+        var interval = _screenshotIntervalMinutes;
+        var now = DateTime.Now;
+        var next = new DateTime(now.Year, now.Month, now.Day, now.Hour, now.Minute, 0).AddMinutes(1);
+        while (next.Minute % interval != 0) next = next.AddMinutes(1);
+        var wait = next - now;
+        return wait < TimeSpan.Zero ? TimeSpan.Zero : wait;
+    }
+
+    private async Task TryUploadScreenshotAsync(CancellationToken ct)
+    {
+        // 1) 仅工作时间段内上传
+        if (!ScreenCapture.IsWorkPeriod(_workPeriods)) return;
+
+        var httpBase = HttpBaseUrl();
+        if (httpBase.Length == 0) return;
+        var pcId = Uri.EscapeDataString(Environment.MachineName);
+
+        // 2) 询问服务器该机的开关与单张体积档位（配置存服务器 data.db，默认不上传）
+        bool enabled;
+        var maxKB = 0;
+        try
+        {
+            var json = await _http.GetStringAsync($"{httpBase}/api/screenshot/config?pcId={pcId}", ct);
+            using var doc = JsonDocument.Parse(json);
+            enabled = doc.RootElement.TryGetProperty("enabled", out var ep) && ep.ValueKind == JsonValueKind.True;
+            if (doc.RootElement.TryGetProperty("maxKB", out var kbProp) && kbProp.TryGetInt32(out var kb)) maxKB = kb;
+        }
+        catch (Exception ex)
+        {
+            _log.LogDebug("截图开关查询失败: {Msg}", ex.Message);
+            return;
+        }
+        if (!enabled || ct.IsCancellationRequested) return;
+
+        // 3) 截图：多屏拼接为同一张图 + JPEG 压缩
+        //    体积档位同时决定画质起点（档位越大越清晰），CaptureSnapshot 再保证不超上限
+        var maxBytes = maxKB > 0 ? Math.Clamp(maxKB, 30, 4096) * 1024 : _screenshotMaxBytes;
+        var (width, quality) = maxKB > 0 ? PresetForKB(maxKB) : (_screenshotMaxWidth, _screenshotQuality);
+        var jpeg = ScreenCapture.CaptureSnapshot(width, quality, maxBytes);
+        if (jpeg is not { Length: > 0 }) return;
+
+        // 4) 上传（请求体即裸 JPEG 字节）
+        try
+        {
+            using var content = new ByteArrayContent(jpeg);
+            content.Headers.ContentType = new MediaTypeHeaderValue("image/jpeg");
+            using var resp = await _http.PostAsync($"{httpBase}/api/screenshot/upload?pcId={pcId}", content, ct);
+            if (resp.IsSuccessStatusCode) _log.LogInformation("定时截图已上传（{KB} KB / 上限 {Max} KB）", jpeg.Length / 1024, maxBytes / 1024);
+            else _log.LogWarning("定时截图上传失败: HTTP {Code}", (int)resp.StatusCode);
+        }
+        catch (Exception ex) { _log.LogWarning("定时截图上传异常: {Msg}", ex.Message); }
+    }
+
+    // 体积档位（KB）→ (每屏像素宽, JPEG 起始质量)：档位越大分辨率与画质越高；
+    // 上限由 CaptureSnapshot 兜底（桌面内容复杂时会自动降质/降分辨率，保证不超）
+    private static (int Width, int Quality) PresetForKB(int maxKB) => maxKB switch
+    {
+        <= 100 => (1280, 50),
+        <= 200 => (1600, 55),
+        <= 300 => (1920, 60),
+        <= 500 => (2560, 65),
+        _      => (3840, 75),
+    };
+
+    // 由 WebSocket 地址推出 HTTP 基地址（origin），供截图上传与更新检查共用
+    private string HttpBaseUrl()
+    {
+        try
+        {
+            var httpUrl = _serverUrl.Replace("wss://", "https://").Replace("ws://", "http://");
+            var uri = new Uri(httpUrl);
+            return $"{uri.Scheme}://{uri.Host}:{uri.Port}";
+        }
+        catch { return ""; }
     }
 
     // ─── 单次连接会话 ────────────────────────────────────────
@@ -142,9 +265,8 @@ public sealed class Worker : BackgroundService
         {
             Log($"开始检查更新，当前版本: {Version}，进程路径: {Environment.ProcessPath}");
 
-            var httpBase = _serverUrl.Replace("wss://", "https://").Replace("ws://", "http://");
-            var baseUri = new Uri(httpBase);
-            var origin = $"{baseUri.Scheme}://{baseUri.Host}:{baseUri.Port}";
+            var origin = HttpBaseUrl();
+            if (origin.Length == 0) { Log("服务器地址无效，跳过更新检查"); return; }
             var checkUrl = $"{origin}/update/check";
             Log($"请求更新检查接口: {checkUrl}");
 

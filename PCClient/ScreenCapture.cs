@@ -67,11 +67,13 @@ static class ScreenCapture
         }
     }
 
-    // 判断当前是否在配置的工作时间段内
-    private static bool InWorkTime(string[] workPeriods)
+    /// <summary>
+    /// 判断当前是否落在配置的工作时间段内（只按时间段判断，不含"周日不算"规则）。
+    /// 定时截图上传复用此方法；未配置 WorkPeriods 时视为不在工作时段。
+    /// </summary>
+    public static bool IsWorkPeriod(string[] workPeriods)
     {
-        if (DateTime.Now.DayOfWeek == DayOfWeek.Sunday) return false;       // 周日全天不发送警告
-        if (workPeriods == null || workPeriods.Length == 0) return false;   // 不配置则不发送警告
+        if (workPeriods == null || workPeriods.Length == 0) return false;
 
         var now = DateTime.Now.TimeOfDay;
         foreach (var period in workPeriods)
@@ -87,6 +89,10 @@ static class ScreenCapture
 
         return false;
     }
+
+    // 离岗告警专用的"工作时间"判断：在时间段内且非周日
+    private static bool InWorkTime(string[] workPeriods)
+        => DateTime.Now.DayOfWeek != DayOfWeek.Sunday && IsWorkPeriod(workPeriods);
 
     private static void TrySendWarning(string employeeUrl, DateTime idleStart, DateTime idleEnd)
     {
@@ -145,7 +151,7 @@ static class ScreenCapture
     }
 
     /// <summary>
-    /// 截取所有屏幕并拼接为单张 JPEG 字节数组。
+    /// 截取所有屏幕并拼接为单张 JPEG 字节数组（实时推流用，不限制体积）。
     /// </summary>
     /// <param name="maxWidthPerScreen">每个屏幕的最大宽度（像素），超出则等比缩放。</param>
     /// <param name="quality">JPEG 质量 1-100，值越小体积越小。</param>
@@ -153,55 +159,156 @@ static class ScreenCapture
     {
         try
         {
-            // 按 X 坐标从左到右排序所有显示器
             var screens = Screen.AllScreens.OrderBy(s => s.Bounds.X).ToArray();
-
-            // 计算缩放比例（以所有屏幕中最宽的为基准）
-            int maxNativeW = screens.Max(s => s.Bounds.Width);
-            float scale = maxWidthPerScreen < maxNativeW
-                           ? (float)maxWidthPerScreen / maxNativeW
-                           : 1.0f;
-
-            // 计算拼接后的画布尺寸
-            int totalW = (int)Math.Round(screens.Sum(s => s.Bounds.Width * scale));
-            int totalH = (int)Math.Round(screens.Max(s => s.Bounds.Height * scale));
-
-            using var canvas = new Bitmap(totalW, totalH, PixelFormat.Format24bppRgb);
-            using var g = Graphics.FromImage(canvas);
-            g.Clear(Color.Black);
-            // 速度优先，不需要高质量缩放
-            g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.Low;
-            g.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighSpeed;
-            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.None;
-
-            int xOffset = 0;
-            foreach (var screen in screens)
-            {
-                var b = screen.Bounds;
-                using var shot = new Bitmap(b.Width, b.Height, PixelFormat.Format32bppArgb);
-                using var sg = Graphics.FromImage(shot);
-                sg.CopyFromScreen(b.Location, Point.Empty, b.Size,
-                                  CopyPixelOperation.SourceCopy);
-
-                int sw = (int)Math.Round(b.Width * scale);
-                int sh = (int)Math.Round(b.Height * scale);
-                g.DrawImage(shot, xOffset, 0, sw, sh);
-                xOffset += sw;
-            }
-
-            // 在拼接图上标注鼠标光标位置
-            DrawCursorHighlight(g, screens, scale, isControlMode);
-
-            using var ms = new MemoryStream();
-            var ep = new EncoderParameters(1);
-            ep.Param[0] = new EncoderParameter(Encoder.Quality, (long)quality);
-            canvas.Save(ms, JpegCodec, ep);
-            return ms.ToArray();
+            using var canvas = BuildCanvas(screens, maxWidthPerScreen, isControlMode);
+            return EncodeJpeg(canvas, quality);
         }
         catch
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// 截取所有屏幕拼接为单张 JPEG，并保证字节数不超过 maxBytes（定时归档用）。
+    /// 先降 JPEG 质量；质量到底线仍超标时，再按体积比例整体缩小画布重编码。
+    /// 多显示器始终拼在同一张图上。
+    /// </summary>
+    public static byte[]? CaptureSnapshot(int maxWidthPerScreen, int quality, int maxBytes)
+    {
+        if (maxBytes <= 0) return Capture(maxWidthPerScreen, quality, isControlMode: true);
+        // 右上角还要烧入截图时间，编码体积会略增，预留 4% 余量
+        var budget = Math.Max(8 * 1024, (int)(maxBytes * 0.96));
+        try
+        {
+            var screens = Screen.AllScreens.OrderBy(s => s.Bounds.X).ToArray();
+            using var canvas = BuildCanvas(screens, maxWidthPerScreen, isControlMode: true);
+
+            var q = Math.Clamp(quality, 1, 100);
+            var current = canvas;
+            Bitmap? smaller = null; // 缩小后的画布副本（需手动释放）
+            try
+            {
+                byte[]? plain = null; // 未打时间戳的编码结果，作为兜底
+                for (var attempt = 0; attempt < 12; attempt++)
+                {
+                    var bytes = EncodeJpeg(current, q);
+                    if (bytes.Length <= budget) { plain = bytes; break; }
+
+                    // 1) 先降质量：不需要重绘，最省 CPU
+                    if (q > 35) { q = Math.Max(35, q - 10); continue; }
+
+                    // 2) 质量到底线仍超标 → 按体积比例整体缩小（JPEG 体积近似与像素数成正比）
+                    var factor = Math.Clamp(Math.Sqrt((double)budget / bytes.Length) * 0.95, 0.4, 0.9);
+                    var nw = Math.Max(320, (int)(current.Width * factor));
+                    var nh = Math.Max(200, (int)(current.Height * factor));
+                    if (nw >= current.Width && nh >= current.Height) { plain = bytes; break; } // 已无法再缩
+
+                    var next = new Bitmap(nw, nh, PixelFormat.Format24bppRgb);
+                    using (var ng = Graphics.FromImage(next))
+                    {
+                        // 缩小时用较平滑的插值，尽量保住文字笔画
+                        ng.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                        ng.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+                        ng.DrawImage(current, 0, 0, nw, nh);
+                    }
+                    smaller?.Dispose();
+                    smaller = next;
+                    current = next;
+                }
+                if (plain == null) plain = EncodeJpeg(current, q);
+
+                // 在最终尺寸的画布右上角烧入截图时间
+                DrawTimestamp(current, DateTime.Now);
+                var stamped = EncodeJpeg(current, q);
+                return stamped.Length <= maxBytes ? stamped : plain; // 极少数情况下退回未打戳版本
+            }
+            finally { smaller?.Dispose(); }
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// 在画布右上角烧入截图时间，样式与离岗标签一致（深色底 + 亮黄等宽字 + 荧光绿描边），
+    /// 保证在任何桌面背景下都能看清。
+    /// </summary>
+    private static void DrawTimestamp(Bitmap bmp, DateTime time)
+    {
+        using var g = Graphics.FromImage(bmp);
+        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
+
+        var fontSize = Math.Max(12f, bmp.Width / 60f); // 随画面宽度自适应
+        using var font = new Font("Courier New", fontSize, FontStyle.Bold, GraphicsUnit.Pixel);
+        var text = time.ToString("yyyy-MM-dd HH:mm:ss");
+        var size = g.MeasureString(text, font);
+
+        int pad = Math.Max(4, (int)(fontSize * 0.35f));
+        int margin = Math.Max(4, (int)(fontSize * 0.4f));
+        int boxW = (int)Math.Ceiling(size.Width) + pad * 2;
+        int boxH = (int)Math.Ceiling(size.Height) + pad * 2;
+        int x = Math.Max(0, bmp.Width - boxW - margin);
+        int y = margin;
+
+        using var bgBrush = new SolidBrush(Color.FromArgb(178, 12, 12, 24));
+        g.FillRectangle(bgBrush, x, y, boxW, boxH);
+        using var border = new Pen(Color.FromArgb(255, 0, 228, 168), Math.Max(1f, fontSize * 0.06f));
+        g.DrawRectangle(border, x, y, boxW, boxH);
+        using var textBrush = new SolidBrush(Color.FromArgb(255, 255, 230, 0));
+        g.DrawString(text, font, textBrush, x + pad, y + pad);
+    }
+
+    /// <summary>截取所有显示器并按 X 坐标从左到右水平拼接为一张画布（调用方负责释放）。</summary>
+    private static Bitmap BuildCanvas(Screen[] screens, int maxWidthPerScreen, bool isControlMode)
+    {
+        // 计算缩放比例（以所有屏幕中最宽的为基准）
+        int maxNativeW = screens.Max(s => s.Bounds.Width);
+        float scale = maxWidthPerScreen < maxNativeW
+                       ? (float)maxWidthPerScreen / maxNativeW
+                       : 1.0f;
+
+        // 计算拼接后的画布尺寸
+        int totalW = (int)Math.Round(screens.Sum(s => s.Bounds.Width * scale));
+        int totalH = (int)Math.Round(screens.Max(s => s.Bounds.Height * scale));
+
+        var canvas = new Bitmap(totalW, totalH, PixelFormat.Format24bppRgb);
+        using var g = Graphics.FromImage(canvas);
+        g.Clear(Color.Black);
+        // 速度优先，不需要高质量缩放
+        g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.Low;
+        g.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighSpeed;
+        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.None;
+
+        int xOffset = 0;
+        foreach (var screen in screens)
+        {
+            var b = screen.Bounds;
+            using var shot = new Bitmap(b.Width, b.Height, PixelFormat.Format32bppArgb);
+            using var sg = Graphics.FromImage(shot);
+            sg.CopyFromScreen(b.Location, Point.Empty, b.Size, CopyPixelOperation.SourceCopy);
+
+            int sw = (int)Math.Round(b.Width * scale);
+            int sh = (int)Math.Round(b.Height * scale);
+            g.DrawImage(shot, xOffset, 0, sw, sh);
+            xOffset += sw;
+        }
+
+        // 在拼接图上标注鼠标光标位置
+        DrawCursorHighlight(g, screens, scale, isControlMode);
+        return canvas;
+    }
+
+    // 按指定质量编码为 JPEG 字节
+    private static byte[] EncodeJpeg(Bitmap bmp, int quality)
+    {
+        using var ms = new MemoryStream();
+        var ep = new EncoderParameters(1);
+        ep.Param[0] = new EncoderParameter(Encoder.Quality, (long)quality);
+        bmp.Save(ms, JpegCodec, ep);
+        return ms.ToArray();
     }
 
     /// <summary>
