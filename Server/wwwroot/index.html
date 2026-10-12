@@ -318,14 +318,18 @@
     #shotViewerBody{flex:1;display:flex;align-items:center;justify-content:center;
                     overflow:hidden;position:relative;padding:0 8px 8px;
                     touch-action:none;overscroll-behavior:contain;user-select:none}
+    /* z-index：图片带 transform 会成为独立层叠上下文，若不指定层级，
+       按 DOM 顺序它会盖住写在前面的「上一张」按钮（只盖前面、不盖后面） */
     #shotViewerImg{max-width:100%;max-height:100%;object-fit:contain;
                    user-select:none;-webkit-user-drag:none;
                    transform-origin:center center;will-change:transform;
-                   cursor:zoom-in;-webkit-user-select:none}
+                   cursor:zoom-in;-webkit-user-select:none;
+                   position:relative;z-index:1}
     #svHint{font-size:11px;color:#556;margin-left:10px;white-space:nowrap}
-    .svNav{position:absolute;top:50%;transform:translateY(-50%);
-           background:rgba(20,20,45,.8);border:1px solid #2a2a55;color:#dde;
-           font-size:20px;line-height:1;padding:12px 10px;border-radius:8px;cursor:pointer}
+    .svNav{position:absolute;top:50%;transform:translateY(-50%);z-index:2;
+           background:rgba(20,20,45,.85);border:1px solid #2a2a55;color:#dde;
+           font-size:22px;line-height:1;padding:12px 10px;border-radius:8px;
+           cursor:pointer;min-width:46px;text-align:center}
     .svNav:hover{border-color:#5cf0b8;color:#5cf0b8}
     #svPrev{left:8px}
     #svNext{right:8px}
