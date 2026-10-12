@@ -56,10 +56,12 @@
 
     /* ── 质量选择弹窗 ── */
     #qualityMask{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);
-                 z-index:100;align-items:center;justify-content:center}
+                 z-index:100;align-items:center;justify-content:center;padding:12px}
     #qualityMask.show{display:flex}
+    /* max-height + 滚动：小屏也不会把底部按钮挤出可视区 */
     #qualityBox{background:#1a1a34;border:1px solid #262650;border-radius:14px;
-                padding:24px 20px;min-width:240px;text-align:center}
+                padding:24px 20px;min-width:240px;text-align:center;
+                max-height:calc(100vh - 24px);overflow-y:auto;-webkit-overflow-scrolling:touch}
     #qualityBox h2{font-size:15px;color:#5cf0b8;margin-bottom:6px}
     #qualityBox p{font-size:12px;color:#778;margin-bottom:18px}
     .qBtn{display:block;width:100%;padding:11px 0;margin-bottom:10px;
@@ -88,6 +90,9 @@
       width:100%;background:#111125;border:1px solid #262650;
       color:#eef;padding:7px 10px;border-radius:6px;font-size:13px;text-align:center}
     .settingRow input[type=text]:focus{outline:none;border-color:#5cf0b8}
+    .settingRow select{width:100%;background:#111125;border:1px solid #262650;
+      color:#eef;padding:7px 10px;border-radius:6px;font-size:13px;cursor:pointer}
+    .settingRow select:focus{outline:none;border-color:#5cf0b8}
     .ctrlBtn{display:block;width:100%;padding:10px 0;margin-bottom:8px;
              border:1px solid #262650;border-radius:8px;background:#111125;
              color:#eef;font-size:13px;cursor:pointer;transition:border-color .15s,background .15s}
@@ -217,6 +222,17 @@
     .kbGroup label:has(input:checked){border-color:#5cf0b8;color:#5cf0b8;
                                       background:#0e2a1e;font-weight:600}
 
+    /* ── 定时截图配置弹框（从设置面板进入，避免设置面板过长）── */
+    #shotCfgMask{display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);
+                 z-index:200;align-items:center;justify-content:center;padding:12px}
+    #shotCfgMask.show{display:flex}
+    #shotCfgBox{background:#1a1a34;border:1px solid #262650;border-radius:14px;
+                padding:20px 18px;width:100%;max-width:320px;
+                max-height:calc(100vh - 24px);overflow-y:auto;
+                -webkit-overflow-scrolling:touch;text-align:left}
+    #shotCfgBox h3{font-size:14px;color:#5cf0b8;margin-bottom:8px;text-align:center}
+    #shotCfgBox .cfgPc{font-size:12px;color:#778;margin-bottom:14px;text-align:center}
+
     /* ── 历史截图墙 ── */
     #shotsPage{display:none;position:fixed;inset:0;background:#111125;
                z-index:250;flex-direction:column}
@@ -263,9 +279,13 @@
            border-radius:6px;cursor:pointer;font-size:13px}
     .svBtn:hover{border-color:#5cf0b8;color:#5cf0b8}
     #shotViewerBody{flex:1;display:flex;align-items:center;justify-content:center;
-                    overflow:hidden;position:relative;padding:0 8px 8px}
+                    overflow:hidden;position:relative;padding:0 8px 8px;
+                    touch-action:none;overscroll-behavior:contain;user-select:none}
     #shotViewerImg{max-width:100%;max-height:100%;object-fit:contain;
-                   user-select:none;-webkit-user-drag:none}
+                   user-select:none;-webkit-user-drag:none;
+                   transform-origin:center center;will-change:transform;
+                   cursor:zoom-in;-webkit-user-select:none}
+    #svHint{font-size:11px;color:#556;margin-left:10px;white-space:nowrap}
     .svNav{position:absolute;top:50%;transform:translateY(-50%);
            background:rgba(20,20,45,.8);border:1px solid #2a2a55;color:#dde;
            font-size:20px;line-height:1;padding:12px 10px;border-radius:8px;cursor:pointer}
@@ -317,30 +337,51 @@
         <input type="text" id="scheduleLockInput" placeholder="如 23:30-07:00"/>
       </div>
       <button class="ctrlBtn" onclick="saveScheduleLock()" style="margin-bottom:14px">⏰ 保存定时锁定</button>
-      <label class="switchRow" title="开启后该机器在每 5 分钟整点（:00 :05 :10 …）上传一张压缩截图，仅工作时间段内执行">
-        <input type="checkbox" id="shotUploadToggle" onchange="saveScreenshotUpload()"/>
-        <span>📷 定时上传截图（每 5 分钟 · 工作时间段内）</span>
-      </label>
-      <div class="settingRow">
-        <label>单张截图体积上限（勾选一项，越大越清晰）</label>
-        <div class="kbGroup" id="shotMaxKBGroup">
-          <label><input type="checkbox" value="100" onchange="onShotMaxKBChange(this)"/>100K</label>
-          <label><input type="checkbox" value="200" onchange="onShotMaxKBChange(this)"/>200K</label>
-          <label><input type="checkbox" value="300" onchange="onShotMaxKBChange(this)"/>300K</label>
-          <label><input type="checkbox" value="500" onchange="onShotMaxKBChange(this)"/>500K</label>
-          <label><input type="checkbox" value="800" onchange="onShotMaxKBChange(this)"/>800K</label>
-        </div>
-      </div>
+      <button class="ctrlBtn" onclick="openShotCfg()" style="margin-bottom:14px">📷 定时截图设置</button>
       <hr style="border:none;border-top:1px solid #1e1e40;margin-bottom:14px"/>
+      <button class="ctrlBtn" onclick="openRemoteInputMode()">🖱️ 远程控制</button>
       <button id="btnLock"   class="ctrlBtn danger" onclick="sendControl('lock_input')">🔒 锁定鼠标</button>
       <button id="btnUnlock" class="ctrlBtn" onclick="sendControl('unlock_input')">🔓 解锁鼠标</button>
-      <button class="ctrlBtn" onclick="openRemoteInputMode()">🖱️ 远程控制</button>
       <hr style="border:none;border-top:1px solid #1e1e40;margin-bottom:14px"/>
       <!-- <button id="btnLockScreen" class="ctrlBtn danger" onclick="sendControl('lock_screen')">💻 进入锁屏</button> -->
       <button id="btnRestart" class="ctrlBtn danger" onclick="askCmdConfirm('restart','确认要强制重启该电脑？')" style="margin-top:6px">🔄 强制重启</button>
       <button id="btnShutdown" class="ctrlBtn danger" onclick="askCmdConfirm('shutdown','确认要强制关机？\n关机后将无法远程唤醒！')" style="margin-top:6px">⚡ 强制关机</button>
       <button class="cancelBtn" onclick="toggleSettings()">← 返回</button>
     </div>
+  </div>
+</div>
+
+<!-- ══ 定时截图配置弹框 ══ -->
+<div id="shotCfgMask" onclick="closeShotCfg()">
+  <div id="shotCfgBox" onclick="event.stopPropagation()">
+    <h3>📷 定时截图</h3>
+    <p class="cfgPc" id="shotCfgPcName"></p>
+    <label class="switchRow" title="开启后该机器按下方间隔上传一张压缩截图（在分钟数能被间隔整除的整分时刻），仅工作时间段内执行">
+      <input type="checkbox" id="shotUploadToggle" onchange="saveScreenshotUpload()"/>
+      <span>开启定时上传（仅工作时间段内）</span>
+    </label>
+    <div class="settingRow">
+      <label>上传间隔</label>
+      <select id="shotIntervalSel" onchange="saveScreenshotInterval()">
+        <option value="1">每 1 分钟</option>
+        <option value="2">每 2 分钟</option>
+        <option value="3">每 3 分钟</option>
+        <option value="4">每 4 分钟</option>
+        <option value="5">每 5 分钟</option>
+        <option value="6">每 6 分钟</option>
+      </select>
+    </div>
+    <div class="settingRow">
+      <label>单张截图体积上限（勾选一项，越大越清晰）</label>
+      <div class="kbGroup" id="shotMaxKBGroup">
+        <label><input type="checkbox" value="100" onchange="onShotMaxKBChange(this)"/>100K</label>
+        <label><input type="checkbox" value="200" onchange="onShotMaxKBChange(this)"/>200K</label>
+        <label><input type="checkbox" value="300" onchange="onShotMaxKBChange(this)"/>300K</label>
+        <label><input type="checkbox" value="500" onchange="onShotMaxKBChange(this)"/>500K</label>
+        <label><input type="checkbox" value="800" onchange="onShotMaxKBChange(this)"/>800K</label>
+      </div>
+    </div>
+    <button class="ctrlBtn" onclick="closeShotCfg()" style="margin-top:14px">完成</button>
   </div>
 </div>
 
@@ -415,6 +456,7 @@
   <div id="shotViewerBar">
     <button class="svBtn" onclick="closeShotViewer()">✕ 关闭</button>
     <span id="shotViewerTitle"></span>
+    <span id="svHint">滚轮 / 双指缩放 · 拖动平移 · 双击复位</span>
     <span id="shotViewerInfo"></span>
   </div>
   <div id="shotViewerBody">
@@ -647,13 +689,14 @@ function renderPcList(pcs){
     pcScheduleLocks[p.Id] = p.ScheduleLock || '';
     pcShotUpload[p.Id] = !!p.ScreenshotUpload;
     pcShotMaxKB[p.Id]  = p.ScreenshotMaxKB || SHOT_MAX_KB_DEFAULT;
+    pcShotInterval[p.Id] = p.ScreenshotIntervalMin || SHOT_INTERVAL_DEFAULT;
   });
   const orderedPcs = applyCardOrder(pcs);
   grid.innerHTML = orderedPcs.map(p => {
     const displayName = getDisplayName(p.Id, p.Name);
     const lockBadge   = p.Locked ? '<span style="font-size:10px;color:#f07060;margin-left:4px">🔒</span>' : '';
     const schedBadge  = pcScheduleLocks[p.Id] ? '<span style="font-size:10px;color:#a0c8f0;margin-left:3px" title="定时锁: ' + esc(pcScheduleLocks[p.Id]) + '">⏰</span>' : '';
-    const shotBadge   = pcShotUpload[p.Id] ? '<span style="font-size:10px;margin-left:3px" title="已开启定时截图上传（单张上限 ' + pcShotMaxKB[p.Id] + 'KB）">📷' + pcShotMaxKB[p.Id] + 'K</span>' : '';
+    const shotBadge   = pcShotUpload[p.Id] ? '<span style="font-size:10px;margin-left:3px" title="已开启定时截图上传（每 ' + pcShotInterval[p.Id] + ' 分钟，单张上限 ' + pcShotMaxKB[p.Id] + 'KB）">📷' + pcShotInterval[p.Id] + 'm·' + pcShotMaxKB[p.Id] + 'K</span>' : '';
     const isOnline    = p.Online !== false;
     const offlineBadge = isOnline ? '' : '<div><span class="offlineBadge">离线</span></div>';
     const cardCls  = isOnline ? 'pcCard' : 'pcCard offline';
@@ -696,6 +739,7 @@ function highlightQualityBtn(quality){
 }
 
 function cancelQuality(){
+  closeShotCfg();                       // 一并关掉截图配置弹框
   document.getElementById('qualityMask').classList.remove('show');
   pendingPcId = pendingPcName = null;
   pendingMode = 'single';
@@ -847,16 +891,20 @@ function showToast(msg){
   el.addEventListener('animationend', () => el.remove());
 }
 
-// ── 定时截图：上传开关 + 单张体积档位（同一设置面板内配置）──
-const pcShotUpload = {}; // pcId → 是否开启定时截图上传
-const pcShotMaxKB  = {}; // pcId → 单张体积上限（KB）
+// ── 定时截图：上传开关 + 间隔 + 单张体积档位（同一设置面板内配置）──
+const pcShotUpload   = {}; // pcId → 是否开启定时截图上传
+const pcShotMaxKB    = {}; // pcId → 单张体积上限（KB）
+const pcShotInterval = {}; // pcId → 上传间隔（分钟）
 const SHOT_MAX_KB_DEFAULT = 300;
+const SHOT_INTERVAL_DEFAULT = 5;
 
 function syncShotToggle(pcId){
   const el = document.getElementById('shotUploadToggle');
   if (el) el.checked = !!pcShotUpload[pcId];
   const kb = pcShotMaxKB[pcId] || SHOT_MAX_KB_DEFAULT;
   document.querySelectorAll('#shotMaxKBGroup input').forEach(c => { c.checked = Number(c.value) === kb; });
+  const ivSel = document.getElementById('shotIntervalSel');
+  if (ivSel) ivSel.value = String(pcShotInterval[pcId] || SHOT_INTERVAL_DEFAULT);
 }
 
 // 档位为"勾选一项"：勾选任一即取消其余，且不允许全部取消
@@ -867,22 +915,37 @@ function onShotMaxKBChange(el){
 }
 
 function saveScreenshotUpload(){ pushShotConfig(true); }
+function saveScreenshotInterval(){ pushShotConfig(true); }
 
-// 开关与档位一起下发，保存即同时生效
+// 截图配置收在独立弹框里，避免设置面板在手机上被撑长
+function openShotCfg(){
+  if (!pendingPcId) return;
+  document.getElementById('shotCfgPcName').textContent = getDisplayName(pendingPcId, pendingPcName);
+  syncShotToggle(pendingPcId);
+  document.getElementById('shotCfgMask').classList.add('show');
+}
+function closeShotCfg(){
+  document.getElementById('shotCfgMask').classList.remove('show');
+}
+
+// 开关 / 间隔 / 体积档位一起下发，改一项即同时生效
 function pushShotConfig(showMsg){
   if (!pendingPcId) return;
   const enabled = document.getElementById('shotUploadToggle').checked;
   const sel = document.querySelector('#shotMaxKBGroup input:checked');
   const maxKB = sel ? Number(sel.value) : (pcShotMaxKB[pendingPcId] || SHOT_MAX_KB_DEFAULT);
-  const kbChanged = pcShotMaxKB[pendingPcId] !== maxKB;
+  const ivSel = document.getElementById('shotIntervalSel');
+  const intervalMin = ivSel ? Number(ivSel.value) : (pcShotInterval[pendingPcId] || SHOT_INTERVAL_DEFAULT);
+  const changed = pcShotMaxKB[pendingPcId] !== maxKB || pcShotInterval[pendingPcId] !== intervalMin;
   if (ws && ws.readyState === WebSocket.OPEN)
-    ws.send(JSON.stringify({action:'setScreenshotUpload', pcId: pendingPcId, enabled, maxKB}));
-  pcShotUpload[pendingPcId] = enabled; // 乐观更新本地缓存
-  pcShotMaxKB[pendingPcId]  = maxKB;
+    ws.send(JSON.stringify({action:'setScreenshotUpload', pcId: pendingPcId, enabled, maxKB, intervalMin}));
+  pcShotUpload[pendingPcId]   = enabled;   // 乐观更新本地缓存
+  pcShotMaxKB[pendingPcId]    = maxKB;
+  pcShotInterval[pendingPcId] = intervalMin;
   if (!showMsg) return;
-  if (!enabled)        showToast('已关闭定时截图上传');
-  else if (kbChanged)  showToast(`每 5 分钟上传一张截图，单张不超过 ${maxKB}KB`);
-  else                 showToast('已开启：每 5 分钟上传一张截图（仅工作时间段）');
+  if (!enabled)      showToast('已关闭定时截图上传');
+  else if (changed)  showToast(`每 ${intervalMin} 分钟上传一张截图，单张不超过 ${maxKB}KB`);
+  else               showToast('已开启：按设定间隔上传（仅工作时间段）');
 }
 
 // ── 历史截图页：以「天」为节点浏览 ───────────────────────────
@@ -1010,13 +1073,18 @@ function openShotViewer(i){
   if (i < 0 || i >= shotsList.length) return;
   shotsIdx = i;
   document.getElementById('shotViewer').classList.add('show');
+  document.body.style.overflow = 'hidden';   // 看大图时锁住页面滚动
   updateShotViewer();
 }
 
 function updateShotViewer(){
   const s = shotsList[shotsIdx];
   if (!s) return;
-  document.getElementById('shotViewerImg').src = s.url;
+  const img = svImg();
+  resetShotZoom();                 // 换图先复位缩放
+  img.src = s.url;
+  if (img.complete && img.naturalWidth) { measureShotBase(); applyShotZoom(); }
+  else img.onload = () => { measureShotBase(); applyShotZoom(); };
   document.getElementById('shotViewerTitle').textContent = `${shotsPcName} · ${shotsDate} ${shotTimeText(s.name)}`;
   document.getElementById('shotViewerInfo').textContent  = `${shotsIdx + 1} / ${shotsList.length} · ${(s.size / 1024).toFixed(0)} KB`;
 }
@@ -1025,20 +1093,163 @@ function stepShot(delta){
   const n = shotsIdx + delta;
   if (n < 0 || n >= shotsList.length) return;
   shotsIdx = n;
-  updateShotViewer();
+  updateShotViewer();              // 内部会复位缩放
 }
 
 function closeShotViewer(){
   document.getElementById('shotViewer').classList.remove('show');
+  resetShotZoom();
+  svPointers.clear(); svPan = null; svPinch = null;
+  document.body.style.overflow = '';
   document.getElementById('shotViewerImg').removeAttribute('src');
 }
 
-// 大图查看时的键盘操作：← 上一张（更早）、→ 下一张（更晚）、Esc 关闭
+// ── 大图缩放与平移（滚轮 / 双指 / 拖动），事件不外泄到底下网页 ─────
+let svScale = 1, svTx = 0, svTy = 0;
+let svBase = { w: 0, h: 0 };        // 适应显示时的图片尺寸（未缩放）
+const SV_MAX_SCALE = 10;
+const svPointers = new Map();       // pointerId → {x,y}
+let svPan = null;                   // 单指/鼠标拖动起点
+let svPinch = null;                 // 双指缩放起点
+
+function svBody(){ return document.getElementById('shotViewerBody'); }
+function svImg(){ return document.getElementById('shotViewerImg'); }
+function svShown(){ return document.getElementById('shotViewer').classList.contains('show'); }
+
+// 记录图片"适应窗口"时占用的尺寸，用于限制平移范围
+function measureShotBase(){
+  const r = svBody().getBoundingClientRect();
+  const img = svImg();
+  const nw = img.naturalWidth || 1, nh = img.naturalHeight || 1;
+  const fit = Math.min(r.width / nw, r.height / nh);
+  svBase = { w: nw * fit, h: nh * fit };
+}
+
+function applyShotZoom(){
+  const img = svImg();
+  img.style.transform = `translate(${svTx}px, ${svTy}px) scale(${svScale})`;
+  img.style.cursor = svScale > 1 ? 'grab' : 'zoom-in';
+}
+
+// 不让图片被拖出可视范围
+function clampShotPan(){
+  const r = svBody().getBoundingClientRect();
+  const mx = Math.max(0, (svBase.w * svScale - r.width) / 2);
+  const my = Math.max(0, (svBase.h * svScale - r.height) / 2);
+  svTx = Math.min(mx, Math.max(-mx, svTx));
+  svTy = Math.min(my, Math.max(-my, svTy));
+}
+
+function resetShotZoom(){ svScale = 1; svTx = 0; svTy = 0; applyShotZoom(); }
+
+// 以 (clientX, clientY) 为锚点缩放：锚点下的图像位置保持不动
+function zoomShotAt(clientX, clientY, factor){
+  const r = svBody().getBoundingClientRect();
+  const ns = Math.min(SV_MAX_SCALE, Math.max(1, svScale * factor));
+  if (ns === svScale) return;
+  const k  = ns / svScale;
+  const ux = clientX - r.left - r.width / 2;
+  const uy = clientY - r.top  - r.height / 2;
+  svTx = ux - (ux - svTx) * k;
+  svTy = uy - (uy - svTy) * k;
+  svScale = ns;
+  if (svScale === 1) { svTx = 0; svTy = 0; }
+  clampShotPan();
+  applyShotZoom();
+}
+
+// 滚轮缩放：passive:false + preventDefault，避免滚到底下的网页
+svBody().addEventListener('wheel', e => {
+  if (!svShown()) return;
+  e.preventDefault();
+  const step = e.deltaMode === 1 ? 0.05 : 0.0015;   // 行模式 vs 像素模式
+  zoomShotAt(e.clientX, e.clientY, Math.exp(-e.deltaY * step));
+}, { passive: false });
+
+svBody().addEventListener('pointerdown', e => {
+  if (!svShown()) return;
+  if (e.pointerType === 'mouse' && e.button !== 0) return;
+  if (e.target.closest('.svNav')) return;            // 不拦截翻页按钮
+  try { svBody().setPointerCapture(e.pointerId); } catch(_) {}
+  svPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+  if (svPointers.size === 1 && svScale > 1) {
+    svPan = { x: e.clientX, y: e.clientY, tx: svTx, ty: svTy };
+    svImg().style.cursor = 'grabbing';
+  } else if (svPointers.size === 2) {
+    svPan = null;
+    const [a, b] = [...svPointers.values()];
+    const r  = svBody().getBoundingClientRect();
+    svPinch = {
+      dist: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)),
+      scale: svScale,
+      ux: (a.x + b.x) / 2 - r.left - r.width / 2,
+      uy: (a.y + b.y) / 2 - r.top  - r.height / 2,
+      tx: svTx, ty: svTy
+    };
+  }
+});
+
+svBody().addEventListener('pointermove', e => {
+  if (!svPointers.has(e.pointerId)) return;
+  svPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  const r = svBody().getBoundingClientRect();
+
+  if (svPinch && svPointers.size >= 2) {
+    // 双指：按两指距离比例缩放，同时跟随中点平移
+    const [a, b] = [...svPointers.values()];
+    const d  = Math.hypot(a.x - b.x, a.y - b.y);
+    const ns = Math.min(SV_MAX_SCALE, Math.max(1, svPinch.scale * (d / svPinch.dist)));
+    const k  = ns / svPinch.scale;
+    const mx = (a.x + b.x) / 2 - r.left - r.width / 2;
+    const my = (a.y + b.y) / 2 - r.top  - r.height / 2;
+    svScale = ns;
+    svTx = mx - (svPinch.ux - svPinch.tx) * k;
+    svTy = my - (svPinch.uy - svPinch.ty) * k;
+    if (svScale === 1) { svTx = 0; svTy = 0; }
+    clampShotPan();
+    applyShotZoom();
+  } else if (svPan) {
+    svTx = svPan.tx + (e.clientX - svPan.x);
+    svTy = svPan.ty + (e.clientY - svPan.y);
+    clampShotPan();
+    applyShotZoom();
+  }
+});
+
+function svEndPointer(e){
+  if (!svPointers.has(e.pointerId)) return;
+  svPointers.delete(e.pointerId);
+  try { svBody().releasePointerCapture(e.pointerId); } catch(_) {}
+  if (svPointers.size < 2) svPinch = null;
+  if (svPointers.size === 0) { svPan = null; applyShotZoom(); }
+  else { const [p] = [...svPointers.values()]; svPan = { x: p.x, y: p.y, tx: svTx, ty: svTy }; }
+}
+svBody().addEventListener('pointerup', svEndPointer);
+svBody().addEventListener('pointercancel', svEndPointer);
+
+// 双击：放大 / 复位
+svBody().addEventListener('dblclick', e => {
+  if (!svShown()) return;
+  e.preventDefault();
+  if (svScale > 1) resetShotZoom();
+  else zoomShotAt(e.clientX, e.clientY, 2.5);
+});
+
+// 窗口尺寸变化后重新适应
+window.addEventListener('resize', () => {
+  if (!svShown()) return;
+  measureShotBase();
+  resetShotZoom();
+});
+
+// 大图查看时的键盘操作：← 上一张（更早）、→ 下一张（更晚）、0 复位缩放、Esc 关闭
 document.addEventListener('keydown', e => {
   if (!document.getElementById('shotViewer').classList.contains('show')) return;
   if (e.key === 'Escape')          closeShotViewer();
   else if (e.key === 'ArrowLeft')  stepShot(-1);
   else if (e.key === 'ArrowRight') stepShot(1);
+  else if (e.key === '0')          resetShotZoom();
 });
 
 // ── 确认画质后开始观看 ─────────────────────

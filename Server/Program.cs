@@ -68,7 +68,8 @@ if (pcsData != null)
         // 定时截图上传开关：老数据没有该键 → 默认 false（不上传）
         var screenshotUpload = obj["screenshotUpload"]?.GetValue<bool>() ?? false;
         var screenshotMaxKB = NormalizeShotMaxKB(obj["screenshotMaxKB"]?.GetValue<int>() ?? 300);
-        pcs[id] = new PCObject { Id = id, Name = name, Locked = locked, Remark = remark, ScheduleLock = scheduleLock, ScreenshotUpload = screenshotUpload, ScreenshotMaxKB = screenshotMaxKB };
+        var screenshotIntervalMin = NormalizeShotInterval(obj["screenshotIntervalMin"]?.GetValue<int>() ?? 5);
+        pcs[id] = new PCObject { Id = id, Name = name, Locked = locked, Remark = remark, ScheduleLock = scheduleLock, ScreenshotUpload = screenshotUpload, ScreenshotMaxKB = screenshotMaxKB, ScreenshotIntervalMin = screenshotIntervalMin };
     }
 }
 if (pcsKeyNormalized) Console.WriteLine("[DB] 已去除 pcs 子对象中 pc_ 前缀");
@@ -299,7 +300,8 @@ app.MapGet("/api/screenshot/config", (HttpContext ctx) =>
     return Results.Json(new
     {
         enabled = pc?.ScreenshotUpload ?? false,
-        maxKB = pc?.ScreenshotMaxKB ?? 300 // 单张截图体积上限（KB）
+        maxKB = pc?.ScreenshotMaxKB ?? 300,        // 单张截图体积上限（KB）
+        intervalMin = pc?.ScreenshotIntervalMin ?? 5 // 上传间隔（分钟）
     });
 });
 
@@ -761,6 +763,8 @@ async Task HandleViewerAsync(WebSocket ws, ViewerSession session)
                     suTarget.ScreenshotUpload = enabled;
                     if (doc.RootElement.TryGetProperty("maxKB", out var kbProp) && kbProp.TryGetInt32(out var kb))
                         suTarget.ScreenshotMaxKB = NormalizeShotMaxKB(kb);
+                    if (doc.RootElement.TryGetProperty("intervalMin", out var ivProp) && ivProp.TryGetInt32(out var iv))
+                        suTarget.ScreenshotIntervalMin = NormalizeShotInterval(iv);
                     SavePc(suTarget);
                     await BroadcastPcListAsync();
                 }
@@ -789,7 +793,8 @@ void SavePc(PCObject pc)
         ["remark"] = JsonValue.Create(pc.Remark),
         ["scheduleLock"] = JsonValue.Create(pc.ScheduleLock),
         ["screenshotUpload"] = JsonValue.Create(pc.ScreenshotUpload),
-        ["screenshotMaxKB"] = JsonValue.Create(pc.ScreenshotMaxKB)
+        ["screenshotMaxKB"] = JsonValue.Create(pc.ScreenshotMaxKB),
+        ["screenshotIntervalMin"] = JsonValue.Create(pc.ScreenshotIntervalMin)
     };
     db.Set("pcs", pcsObj);
 }
@@ -824,6 +829,9 @@ bool IsShotName(string s) => System.Text.RegularExpressions.Regex.IsMatch(s ?? "
 
 // 单张截图体积档位（KB），与前端"勾选一项"的选项保持一致；其它值一律回落默认 300
 int NormalizeShotMaxKB(int kb) => kb is 100 or 200 or 300 or 500 or 800 ? kb : 300;
+
+// 上传间隔（分钟），与前端下拉框的选项保持一致；其它值一律回落默认 5
+int NormalizeShotInterval(int min) => min is >= 1 and <= 6 ? min : 5;
 
 // 列出该 PC 已有截图的日期（倒序，最新在前）
 List<string> ListShotDates(string pcId)
@@ -916,7 +924,7 @@ async Task SendPcListAsync(ViewerEntry viewer)
     if (viewer.AllowedPcIds != null)
         allowedPcs = allowedPcs.Where(p => viewer.AllowedPcIds.Contains(p.Id));
     var list = allowedPcs
-        .Select(p => new { p.Id, p.Name, p.Remark, Online = p.IsOnline, p.Locked, p.Version, p.ScheduleLock, p.ScreenshotUpload, p.ScreenshotMaxKB })
+        .Select(p => new { p.Id, p.Name, p.Remark, Online = p.IsOnline, p.Locked, p.Version, p.ScheduleLock, p.ScreenshotUpload, p.ScreenshotMaxKB, p.ScreenshotIntervalMin })
         .OrderByDescending(p => p.Online)
         .ThenBy(p => p.Name)
         .ToList();
@@ -977,6 +985,7 @@ class PCObject
     public string ScheduleLock { get; set; } = ""; // 定时锁定时段，格式 "HH:mm-HH:mm"，可跨越0点
     public bool ScreenshotUpload { get; set; } = false; // 是否每 5 分钟上传定时截图（默认关闭）
     public int ScreenshotMaxKB { get; set; } = 300; // 单张截图体积上限（KB），档位 100/200/300/500/800
+    public int ScreenshotIntervalMin { get; set; } = 5; // 上传间隔（分钟），可选 1-6
     public bool IsLockActive { get; set; } = false; // 当前是否处于定时锁定状态
     public WebSocket? Socket { get; set; } = null;
     public bool IsOnline => Socket is { State: WebSocketState.Open };

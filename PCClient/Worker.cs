@@ -11,7 +11,7 @@ public sealed class Worker : BackgroundService
 {
     // ═══════════════ 配置（直接修改这里）═══════════════
     private const string DefaultServerUrl = "ws://fjwqgame.com:999/ws";
-    private const string Version = "v1.0.8.1";
+    private const string Version = "v1.0.8.2";
 
     private const int DefaultFps = 5;
     private const int DefaultJpegQuality = 55;
@@ -77,7 +77,7 @@ public sealed class Worker : BackgroundService
     }
 
     // ─── 定时截图归档 ────────────────────────────────────────────
-    // 在"分钟数 % 间隔 == 0"的整分时刻触发（默认每 5 分钟 → :00 :05 :10 …），
+    // 在"分钟数 % 间隔 == 0"的整分时刻触发（间隔 1-6 分钟，默认 5 → :00 :05 :10 …），
     // 仅工作时间段内执行，且需服务器端已为该机开启上传开关（默认关闭）
     private async Task RunScreenshotLoopAsync(CancellationToken ct)
     {
@@ -85,9 +85,21 @@ public sealed class Worker : BackgroundService
         {
             try
             {
-                var wait = DelayToNextShotMoment();
+                var httpBase = HttpBaseUrl();
+                if (httpBase.Length == 0) { await Task.Delay(TimeSpan.FromSeconds(30), ct); continue; }
+
+                // 先取一次配置：用其中的间隔去对齐下一个整分时刻
+                var pre = await FetchShotConfigAsync(httpBase, ct);
+                var wait = DelayToNextShotMoment(pre.IntervalMin);
                 if (wait > TimeSpan.Zero) await Task.Delay(wait, ct);
-                await TryUploadScreenshotAsync(ct);
+
+                // 到点后再取一次：让开关/档位/间隔的改动即时生效，不受本轮等待影响
+                var cfg = await FetchShotConfigAsync(httpBase, ct);
+                if (!cfg.Enabled || ct.IsCancellationRequested) continue;
+                // 仅工作时间段内上传
+                if (!ScreenCapture.IsWorkPeriod(_workPeriods)) continue;
+
+                await CaptureAndUploadAsync(httpBase, cfg, ct);
             }
             catch (OperationCanceledException) { break; }
             catch (Exception ex) { _log.LogWarning("定时截图异常: {Msg}", ex.Message); }
@@ -95,9 +107,9 @@ public sealed class Worker : BackgroundService
     }
 
     // 距离下一个整分（分钟数能被间隔整除）的等待时长；每轮重新计算，免疫系统时间调整
-    private TimeSpan DelayToNextShotMoment()
+    private static TimeSpan DelayToNextShotMoment(int intervalMin)
     {
-        var interval = _screenshotIntervalMinutes;
+        var interval = Math.Clamp(intervalMin, 1, 60);
         var now = DateTime.Now;
         var next = new DateTime(now.Year, now.Month, now.Day, now.Hour, now.Minute, 0).AddMinutes(1);
         while (next.Minute % interval != 0) next = next.AddMinutes(1);
@@ -105,47 +117,55 @@ public sealed class Worker : BackgroundService
         return wait < TimeSpan.Zero ? TimeSpan.Zero : wait;
     }
 
-    private async Task TryUploadScreenshotAsync(CancellationToken ct)
+    // 服务器为该机下发的截图配置
+    private readonly struct ShotConfig
     {
-        // 1) 仅工作时间段内上传
-        if (!ScreenCapture.IsWorkPeriod(_workPeriods)) return;
+        public bool Enabled { get; init; }
+        public int MaxKB { get; init; }
+        public int IntervalMin { get; init; }
+    }
 
-        var httpBase = HttpBaseUrl();
-        if (httpBase.Length == 0) return;
-        var pcId = Uri.EscapeDataString(Environment.MachineName);
-
-        // 2) 询问服务器该机的开关与单张体积档位（配置存服务器 data.db，默认不上传）
-        bool enabled;
-        var maxKB = 0;
+    private async Task<ShotConfig> FetchShotConfigAsync(string httpBase, CancellationToken ct)
+    {
+        var fallback = new ShotConfig { Enabled = false, MaxKB = 0, IntervalMin = _screenshotIntervalMinutes };
         try
         {
+            var pcId = Uri.EscapeDataString(Environment.MachineName);
             var json = await _http.GetStringAsync($"{httpBase}/api/screenshot/config?pcId={pcId}", ct);
             using var doc = JsonDocument.Parse(json);
-            enabled = doc.RootElement.TryGetProperty("enabled", out var ep) && ep.ValueKind == JsonValueKind.True;
-            if (doc.RootElement.TryGetProperty("maxKB", out var kbProp) && kbProp.TryGetInt32(out var kb)) maxKB = kb;
+            var root = doc.RootElement;
+            var enabled = root.TryGetProperty("enabled", out var ep) && ep.ValueKind == JsonValueKind.True;
+            var maxKB = root.TryGetProperty("maxKB", out var kbp) && kbp.TryGetInt32(out var kb) ? kb : 0;
+            var interval = root.TryGetProperty("intervalMin", out var ivp) && ivp.TryGetInt32(out var iv) ? iv : 0;
+            if (interval < 1 || interval > 60) interval = _screenshotIntervalMinutes; // 老服务端不返回该字段时用本地配置
+            return new ShotConfig { Enabled = enabled, MaxKB = maxKB, IntervalMin = interval };
         }
         catch (Exception ex)
         {
-            _log.LogDebug("截图开关查询失败: {Msg}", ex.Message);
-            return;
+            _log.LogDebug("截图配置查询失败: {Msg}", ex.Message);
+            return fallback;
         }
-        if (!enabled || ct.IsCancellationRequested) return;
+    }
 
-        // 3) 截图：多屏拼接为同一张图 + JPEG 压缩
-        //    体积档位同时决定画质起点（档位越大越清晰），CaptureSnapshot 再保证不超上限
-        var maxBytes = maxKB > 0 ? Math.Clamp(maxKB, 30, 4096) * 1024 : _screenshotMaxBytes;
-        var (width, quality) = maxKB > 0 ? PresetForKB(maxKB) : (_screenshotMaxWidth, _screenshotQuality);
+    private async Task CaptureAndUploadAsync(string httpBase, ShotConfig cfg, CancellationToken ct)
+    {
+        // 体积档位同时决定画质起点（档位越大越清晰），CaptureSnapshot 再保证不超上限
+        var maxBytes = cfg.MaxKB > 0 ? Math.Clamp(cfg.MaxKB, 30, 4096) * 1024 : _screenshotMaxBytes;
+        var (width, quality) = cfg.MaxKB > 0 ? PresetForKB(cfg.MaxKB) : (_screenshotMaxWidth, _screenshotQuality);
+
         var jpeg = ScreenCapture.CaptureSnapshot(width, quality, maxBytes);
         if (jpeg is not { Length: > 0 }) return;
 
-        // 4) 上传（请求体即裸 JPEG 字节）
         try
         {
+            var pcId = Uri.EscapeDataString(Environment.MachineName);
             using var content = new ByteArrayContent(jpeg);
             content.Headers.ContentType = new MediaTypeHeaderValue("image/jpeg");
             using var resp = await _http.PostAsync($"{httpBase}/api/screenshot/upload?pcId={pcId}", content, ct);
-            if (resp.IsSuccessStatusCode) _log.LogInformation("定时截图已上传（{KB} KB / 上限 {Max} KB）", jpeg.Length / 1024, maxBytes / 1024);
-            else _log.LogWarning("定时截图上传失败: HTTP {Code}", (int)resp.StatusCode);
+            if (resp.IsSuccessStatusCode)
+                _log.LogInformation("定时截图已上传（{KB} KB / 上限 {Max} KB / 每 {Min} 分钟）", jpeg.Length / 1024, maxBytes / 1024, cfg.IntervalMin);
+            else
+                _log.LogWarning("定时截图上传失败: HTTP {Code}", (int)resp.StatusCode);
         }
         catch (Exception ex) { _log.LogWarning("定时截图上传异常: {Msg}", ex.Message); }
     }
