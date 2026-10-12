@@ -69,7 +69,8 @@ if (pcsData != null)
         var screenshotUpload = obj["screenshotUpload"]?.GetValue<bool>() ?? false;
         var screenshotMaxKB = NormalizeShotMaxKB(obj["screenshotMaxKB"]?.GetValue<int>() ?? 300);
         var screenshotIntervalMin = NormalizeShotInterval(obj["screenshotIntervalMin"]?.GetValue<int>() ?? 5);
-        pcs[id] = new PCObject { Id = id, Name = name, Locked = locked, Remark = remark, ScheduleLock = scheduleLock, ScreenshotUpload = screenshotUpload, ScreenshotMaxKB = screenshotMaxKB, ScreenshotIntervalMin = screenshotIntervalMin };
+        var screenshotWorkTimeOnly = obj["screenshotWorkTimeOnly"]?.GetValue<bool>() ?? true;
+        pcs[id] = new PCObject { Id = id, Name = name, Locked = locked, Remark = remark, ScheduleLock = scheduleLock, ScreenshotUpload = screenshotUpload, ScreenshotMaxKB = screenshotMaxKB, ScreenshotIntervalMin = screenshotIntervalMin, ScreenshotWorkTimeOnly = screenshotWorkTimeOnly };
     }
 }
 if (pcsKeyNormalized) Console.WriteLine("[DB] 已去除 pcs 子对象中 pc_ 前缀");
@@ -318,8 +319,9 @@ app.MapGet("/api/screenshot/config", (HttpContext ctx) =>
     return Results.Json(new
     {
         enabled = pc?.ScreenshotUpload ?? false,
-        maxKB = pc?.ScreenshotMaxKB ?? 300,        // 单张截图体积上限（KB）
-        intervalMin = pc?.ScreenshotIntervalMin ?? 5 // 上传间隔（分钟）
+        maxKB = pc?.ScreenshotMaxKB ?? 300,           // 单张截图体积上限（KB）
+        intervalMin = pc?.ScreenshotIntervalMin ?? 5, // 上传间隔（分钟）
+        workTimeOnly = pc?.ScreenshotWorkTimeOnly ?? true // 是否仅工作时间段内上传
     });
 });
 
@@ -608,6 +610,9 @@ async Task HandlePcAsync(WebSocket ws)
                         Console.WriteLine($"[锁] PC 重连，解除锁定: {pcName}");
                         await ForwardControlToPcAsync(pcId, "unlock_input");
                     }
+
+                    // 上线（含重连）后同步一次定时截图配置：离线期间改的设置在这里补发
+                    await PushShotConfigAsync(pcId);
                 }
             }
             else if (result.MessageType == WebSocketMessageType.Binary && !string.IsNullOrEmpty(pcId))
@@ -783,8 +788,13 @@ async Task HandleViewerAsync(WebSocket ws, ViewerSession session)
                         suTarget.ScreenshotMaxKB = NormalizeShotMaxKB(kb);
                     if (doc.RootElement.TryGetProperty("intervalMin", out var ivProp) && ivProp.TryGetInt32(out var iv))
                         suTarget.ScreenshotIntervalMin = NormalizeShotInterval(iv);
+                    if (doc.RootElement.TryGetProperty("workTimeOnly", out var wtProp)
+                        && (wtProp.ValueKind == JsonValueKind.True || wtProp.ValueKind == JsonValueKind.False))
+                        suTarget.ScreenshotWorkTimeOnly = wtProp.GetBoolean();
                     SavePc(suTarget);
                     await BroadcastPcListAsync();
+                    // 立刻推给被控 PC，让开关/间隔/档位/时段限制立即生效
+                    await PushShotConfigAsync(targetPcId);
                 }
             }
         }
@@ -812,7 +822,8 @@ void SavePc(PCObject pc)
         ["scheduleLock"] = JsonValue.Create(pc.ScheduleLock),
         ["screenshotUpload"] = JsonValue.Create(pc.ScreenshotUpload),
         ["screenshotMaxKB"] = JsonValue.Create(pc.ScreenshotMaxKB),
-        ["screenshotIntervalMin"] = JsonValue.Create(pc.ScreenshotIntervalMin)
+        ["screenshotIntervalMin"] = JsonValue.Create(pc.ScreenshotIntervalMin),
+        ["screenshotWorkTimeOnly"] = JsonValue.Create(pc.ScreenshotWorkTimeOnly)
     };
     db.Set("pcs", pcsObj);
 }
@@ -904,6 +915,21 @@ async Task NotifyPcStartAsync(string pcId, int quality, int fps)
     await SafeSendTextAsync(pc.Socket!, JsonSerializer.Serialize(new { command = "start", quality, fps }));
 }
 
+// 把该机的定时截图配置实时推给 PC —— 改动立即生效；
+// PC 离线时这里什么都不做，等它重新注册上线时会在注册流程里再推一次
+async Task PushShotConfigAsync(string pcId)
+{
+    if (!pcs.TryGetValue(pcId, out var pc) || !pc.IsOnline) return;
+    await SafeSendTextAsync(pc.Socket!, JsonSerializer.Serialize(new
+    {
+        command = "screenshot_config",
+        enabled = pc.ScreenshotUpload,
+        maxKB = pc.ScreenshotMaxKB,
+        intervalMin = pc.ScreenshotIntervalMin,
+        workTimeOnly = pc.ScreenshotWorkTimeOnly
+    }));
+}
+
 // 转发简化的控制命令，返回是否发送成功
 async Task<bool> ForwardControlToPcAsync(string pcId, string cmd)
 {
@@ -942,7 +968,7 @@ async Task SendPcListAsync(ViewerEntry viewer)
     if (viewer.AllowedPcIds != null)
         allowedPcs = allowedPcs.Where(p => viewer.AllowedPcIds.Contains(p.Id));
     var list = allowedPcs
-        .Select(p => new { p.Id, p.Name, p.Remark, Online = p.IsOnline, p.Locked, p.Version, p.ScheduleLock, p.ScreenshotUpload, p.ScreenshotMaxKB, p.ScreenshotIntervalMin })
+        .Select(p => new { p.Id, p.Name, p.Remark, Online = p.IsOnline, p.Locked, p.Version, p.ScheduleLock, p.ScreenshotUpload, p.ScreenshotMaxKB, p.ScreenshotIntervalMin, p.ScreenshotWorkTimeOnly })
         .OrderByDescending(p => p.Online)
         .ThenBy(p => p.Name)
         .ToList();
@@ -1004,6 +1030,7 @@ class PCObject
     public bool ScreenshotUpload { get; set; } = false; // 是否每 5 分钟上传定时截图（默认关闭）
     public int ScreenshotMaxKB { get; set; } = 300; // 单张截图体积上限（KB），档位 100/200/300/500/800
     public int ScreenshotIntervalMin { get; set; } = 5; // 上传间隔（分钟），可选 1-6
+    public bool ScreenshotWorkTimeOnly { get; set; } = true; // 是否仅在客户端配置的工作时间段内上传（默认是）
     public bool IsLockActive { get; set; } = false; // 当前是否处于定时锁定状态
     public WebSocket? Socket { get; set; } = null;
     public bool IsOnline => Socket is { State: WebSocketState.Open };

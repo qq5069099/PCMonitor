@@ -241,6 +241,12 @@
                      cursor:pointer;flex-shrink:0;margin:0}
     .switchRow span{font-size:12px;color:#aab;line-height:1.3}
 
+    /* ── 两个勾选项并排一行（开启定时上传 / 仅工作时间段）── */
+    .switchRowGrp{display:flex;gap:6px;margin-bottom:12px}
+    .switchRowGrp .switchRow{flex:1;min-width:0;margin-bottom:0;padding:8px 8px;gap:6px}
+    .switchRowGrp .switchRow span{font-size:12px;white-space:nowrap}
+    .switchRowGrp .switchRow input{width:15px;height:15px}
+
     /* ── 单张截图体积档位：勾选式单选（勾一项自动取消其余）── */
     .kbGroup{display:flex;flex-wrap:wrap;gap:6px}
     .settingRow .kbGroup label{display:flex;align-items:center;gap:5px;
@@ -405,10 +411,16 @@
   <div id="shotCfgBox" onclick="event.stopPropagation()">
     <h3>📷 定时截图</h3>
     <p class="cfgPc" id="shotCfgPcName"></p>
-    <label class="switchRow" title="开启后该机器按下方间隔上传一张压缩截图（在分钟数能被间隔整除的整分时刻），仅工作时间段内执行">
-      <input type="checkbox" id="shotUploadToggle" onchange="saveScreenshotUpload()"/>
-      <span>开启定时上传（仅工作时间段内）</span>
-    </label>
+    <div class="switchRowGrp">
+      <label class="switchRow" title="开启后该机器按下方间隔上传一张压缩截图（在每个间隔窗口内随机取时刻，避免多台机器同时上传）">
+        <input type="checkbox" id="shotUploadToggle" onchange="saveScreenshotUpload()"/>
+        <span>开启定时上传</span>
+      </label>
+      <label class="switchRow" title="勾选：只在客户端配置的工作时间段内上传；不勾选：全天上传">
+        <input type="checkbox" id="shotWorkTimeToggle" onchange="saveScreenshotWorkTime()"/>
+        <span>仅工作时间段</span>
+      </label>
+    </div>
     <div class="settingRow">
       <label>上传间隔</label>
       <select id="shotIntervalSel" onchange="saveScreenshotInterval()">
@@ -739,6 +751,7 @@ function renderPcList(pcs){
     pcShotUpload[p.Id] = !!p.ScreenshotUpload;
     pcShotMaxKB[p.Id]  = p.ScreenshotMaxKB || SHOT_MAX_KB_DEFAULT;
     pcShotInterval[p.Id] = p.ScreenshotIntervalMin || SHOT_INTERVAL_DEFAULT;
+    pcShotWorkTime[p.Id] = p.ScreenshotWorkTimeOnly !== false;
   });
   const orderedPcs = applyCardOrder(pcs);
   grid.innerHTML = orderedPcs.map(p => {
@@ -968,12 +981,15 @@ function showToast(msg){
 const pcShotUpload   = {}; // pcId → 是否开启定时截图上传
 const pcShotMaxKB    = {}; // pcId → 单张体积上限（KB）
 const pcShotInterval = {}; // pcId → 上传间隔（分钟）
+const pcShotWorkTime = {}; // pcId → 是否仅工作时间段内上传
 const SHOT_MAX_KB_DEFAULT = 300;
 const SHOT_INTERVAL_DEFAULT = 5;
 
 function syncShotToggle(pcId){
   const el = document.getElementById('shotUploadToggle');
   if (el) el.checked = !!pcShotUpload[pcId];
+  const wt = document.getElementById('shotWorkTimeToggle');
+  if (wt) wt.checked = pcShotWorkTime[pcId] !== false;
   const kb = pcShotMaxKB[pcId] || SHOT_MAX_KB_DEFAULT;
   document.querySelectorAll('#shotMaxKBGroup input').forEach(c => { c.checked = Number(c.value) === kb; });
   const ivSel = document.getElementById('shotIntervalSel');
@@ -989,6 +1005,7 @@ function onShotMaxKBChange(el){
 
 function saveScreenshotUpload(){ pushShotConfig(true); }
 function saveScreenshotInterval(){ pushShotConfig(true); }
+function saveScreenshotWorkTime(){ pushShotConfig(true); }
 
 // 截图配置收在独立弹框里，避免设置面板在手机上被撑长
 function openShotCfg(){
@@ -1001,24 +1018,29 @@ function closeShotCfg(){
   document.getElementById('shotCfgMask').classList.remove('show');
 }
 
-// 开关 / 间隔 / 体积档位一起下发，改一项即同时生效
+// 开关 / 仅工作时间段 / 间隔 / 体积档位一起下发，改一项即同时生效（服务端会实时推给被控 PC）
 function pushShotConfig(showMsg){
   if (!pendingPcId) return;
   const enabled = document.getElementById('shotUploadToggle').checked;
+  const wtEl = document.getElementById('shotWorkTimeToggle');
+  const workTimeOnly = wtEl ? wtEl.checked : (pcShotWorkTime[pendingPcId] !== false);
   const sel = document.querySelector('#shotMaxKBGroup input:checked');
   const maxKB = sel ? Number(sel.value) : (pcShotMaxKB[pendingPcId] || SHOT_MAX_KB_DEFAULT);
   const ivSel = document.getElementById('shotIntervalSel');
   const intervalMin = ivSel ? Number(ivSel.value) : (pcShotInterval[pendingPcId] || SHOT_INTERVAL_DEFAULT);
-  const changed = pcShotMaxKB[pendingPcId] !== maxKB || pcShotInterval[pendingPcId] !== intervalMin;
+  const changed = pcShotMaxKB[pendingPcId] !== maxKB
+               || pcShotInterval[pendingPcId] !== intervalMin
+               || pcShotWorkTime[pendingPcId] !== workTimeOnly;
   if (ws && ws.readyState === WebSocket.OPEN)
-    ws.send(JSON.stringify({action:'setScreenshotUpload', pcId: pendingPcId, enabled, maxKB, intervalMin}));
+    ws.send(JSON.stringify({action:'setScreenshotUpload', pcId: pendingPcId, enabled, maxKB, intervalMin, workTimeOnly}));
   pcShotUpload[pendingPcId]   = enabled;   // 乐观更新本地缓存
   pcShotMaxKB[pendingPcId]    = maxKB;
   pcShotInterval[pendingPcId] = intervalMin;
+  pcShotWorkTime[pendingPcId] = workTimeOnly;
   if (!showMsg) return;
   if (!enabled)      showToast('已关闭定时截图上传');
-  else if (changed)  showToast(`每 ${intervalMin} 分钟上传一张截图，单张不超过 ${maxKB}KB`);
-  else               showToast('已开启：按设定间隔上传（仅工作时间段）');
+  else if (changed)  showToast(`每 ${intervalMin} 分钟上传一张，单张不超过 ${maxKB}KB${workTimeOnly ? '，仅工作时间段' : '，全天'}`);
+  else               showToast('已保存，PC 端会立即生效');
 }
 
 // ── 历史截图页：以「天」为节点浏览 ───────────────────────────

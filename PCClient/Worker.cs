@@ -11,7 +11,7 @@ public sealed class Worker : BackgroundService
 {
     // ═══════════════ 配置（直接修改这里）═══════════════
     private const string DefaultServerUrl = "ws://fjwqgame.com:999/ws";
-    private const string Version = "v1.0.8.3";
+    private const string Version = "v1.0.8.4";
 
     private const int DefaultFps = 5;
     private const int DefaultJpegQuality = 55;
@@ -93,16 +93,17 @@ public sealed class Worker : BackgroundService
                 var httpBase = HttpBaseUrl();
                 if (httpBase.Length == 0) { await Task.Delay(TimeSpan.FromSeconds(30), ct); continue; }
 
-                // 先取一次配置：用其中的间隔去对齐下一个整分时刻
-                var pre = await FetchShotConfigAsync(httpBase, ct);
-                var wait = DelayToNextShotMoment(pre.IntervalMin);
-                if (wait > TimeSpan.Zero) await Task.Delay(wait, ct);
+                // 每轮拉一次配置（推送之外的兜底），拿到最新的间隔
+                _shotCfg = await FetchShotConfigAsync(httpBase, ct);
 
-                // 到点后再取一次：让开关/档位/间隔的改动即时生效，不受本轮等待影响
-                var cfg = await FetchShotConfigAsync(httpBase, ct);
+                var wait = DelayToNextShotMoment(_shotCfg.IntervalMin);
+                // 等待期间若服务器推来新配置，立刻重算（配置改动立即生效）
+                if (wait > TimeSpan.Zero && !await SleepOrConfigChangedAsync(wait, ct)) continue;
+
+                var cfg = _shotCfg;   // 以最新配置为准
                 if (!cfg.Enabled || ct.IsCancellationRequested) continue;
-                // 仅工作时间段内上传
-                if (!InShotWindow()) continue;
+                // 服务器可要求"仅工作时间段内上传"（默认要求）
+                if (!InShotWindow(cfg)) continue;
 
                 var jpeg = CaptureShot(cfg);
                 if (jpeg == null) continue;
@@ -111,6 +112,17 @@ public sealed class Worker : BackgroundService
             catch (OperationCanceledException) { break; }
             catch (Exception ex) { _log.LogWarning("定时截图异常: {Msg}", ex.Message); }
         }
+    }
+
+    /// <summary>等待到点；期间收到新的配置推送则提前返回 false，让循环立即重算。</summary>
+    private async Task<bool> SleepOrConfigChangedAsync(TimeSpan wait, CancellationToken ct)
+    {
+        var signal = _shotCfgSignal;
+        var delay = Task.Delay(wait, ct);
+        var done = await Task.WhenAny(delay, signal.Task);
+        if (done == signal.Task) return false;
+        await delay;   // 未被打断：正常等待结束（取消时由此抛出）
+        return true;
     }
 
     /// <summary>
@@ -141,38 +153,61 @@ public sealed class Worker : BackgroundService
     }
 
     /// <summary>
-    /// 是否允许上传截图。未配置 WorkPeriods 时视为全天允许 ——
-    /// 否则只放了 exe、没有 appsettings.json 的客户端会永远不上传（静默失败）。
+    /// 是否允许上传截图。服务器勾了"仅工作时间段"才判断时段；
+    /// 另外未配置 WorkPeriods 时视为全天允许 —— 否则只放了 exe、
+    /// 没有 appsettings.json 的客户端会永远不上传（静默失败）。
     /// </summary>
-    private bool InShotWindow() => _workPeriods.Length == 0 || ScreenCapture.IsWorkPeriod(_workPeriods);
+    private bool InShotWindow(ShotConfig cfg)
+        => !cfg.WorkTimeOnly || _workPeriods.Length == 0 || ScreenCapture.IsWorkPeriod(_workPeriods);
 
-    // 服务器为该机下发的截图配置
-    private readonly struct ShotConfig
+    // 服务器为该机下发的截图配置（用类以便整体原子替换）
+    private sealed class ShotConfig
     {
         public bool Enabled { get; init; }
         public int MaxKB { get; init; }
-        public int IntervalMin { get; init; }
+        public int IntervalMin { get; init; } = 5;
+        public bool WorkTimeOnly { get; init; } = true;
+    }
+
+    // 最近一次生效的截图配置：HTTP 拉取或服务器推送都会更新它
+    private volatile ShotConfig _shotCfg = new() { IntervalMin = 5, WorkTimeOnly = true };
+
+    // 配置变更信号：用于打断截图循环的等待，让改动立即生效
+    private volatile TaskCompletionSource _shotCfgSignal = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    private static ShotConfig ParseShotConfig(JsonElement root) => new()
+    {
+        Enabled = root.TryGetProperty("enabled", out var ep) && ep.ValueKind == JsonValueKind.True,
+        MaxKB = root.TryGetProperty("maxKB", out var kbp) && kbp.TryGetInt32(out var kb) ? kb : 0,
+        IntervalMin = root.TryGetProperty("intervalMin", out var ivp) && ivp.TryGetInt32(out var iv) && iv is >= 1 and <= 60
+                        ? iv : 5,
+        // 老服务端不返回该字段时按"仅工作时间段"处理，保持原有行为
+        WorkTimeOnly = !root.TryGetProperty("workTimeOnly", out var wtp) || wtp.ValueKind != JsonValueKind.False
+    };
+
+    // 服务器推送新配置：立即替换并唤醒截图循环
+    private void ApplyShotConfig(JsonElement root)
+    {
+        _shotCfg = ParseShotConfig(root);
+        var old = _shotCfgSignal;
+        _shotCfgSignal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        old.TrySetResult();
     }
 
     private async Task<ShotConfig> FetchShotConfigAsync(string httpBase, CancellationToken ct)
     {
-        var fallback = new ShotConfig { Enabled = false, MaxKB = 0, IntervalMin = _screenshotIntervalMinutes };
         try
         {
             var pcId = Uri.EscapeDataString(Environment.MachineName);
             var json = await _http.GetStringAsync($"{httpBase}/api/screenshot/config?pcId={pcId}", ct);
             using var doc = JsonDocument.Parse(json);
-            var root = doc.RootElement;
-            var enabled = root.TryGetProperty("enabled", out var ep) && ep.ValueKind == JsonValueKind.True;
-            var maxKB = root.TryGetProperty("maxKB", out var kbp) && kbp.TryGetInt32(out var kb) ? kb : 0;
-            var interval = root.TryGetProperty("intervalMin", out var ivp) && ivp.TryGetInt32(out var iv) ? iv : 0;
-            if (interval < 1 || interval > 60) interval = _screenshotIntervalMinutes; // 老服务端不返回该字段时用本地配置
-            return new ShotConfig { Enabled = enabled, MaxKB = maxKB, IntervalMin = interval };
+            return ParseShotConfig(doc.RootElement);
         }
         catch (Exception ex)
         {
+            // 网络抖动时沿用上次配置，避免被误判成"已关闭"而中断重试
             _log.LogDebug("截图配置查询失败: {Msg}", ex.Message);
-            return fallback;
+            return _shotCfg;
         }
     }
 
@@ -203,8 +238,8 @@ public sealed class Worker : BackgroundService
             _log.LogWarning("定时截图上传失败，{Sec} 秒后进行第 {N} 次重试", (int)waitSec, attempt);
             try { await Task.Delay(TimeSpan.FromSeconds(waitSec), ct); } catch (OperationCanceledException) { return; }
 
-            // 重试前确认开关仍然打开，避免用户关掉后还在后台反复重发
-            if (!(await FetchShotConfigAsync(httpBase, ct)).Enabled)
+            // 重试前确认开关仍然打开（服务器改配置会实时推送，所以这里读到的一定是最新值）
+            if (!_shotCfg.Enabled)
             {
                 _log.LogInformation("定时截图开关已关闭，放弃重试");
                 return;
@@ -601,6 +636,13 @@ public sealed class Worker : BackgroundService
                                 break;
                             }
                     }
+                }
+                else if (cmd == "screenshot_config")
+                {
+                    // 服务器一改配置就下发，这里立即生效（打断当前等待，按新配置重算下一次上传时刻）
+                    ApplyShotConfig(doc.RootElement);
+                    _log.LogInformation("截图配置已更新: 开关={On} 间隔={Min}分钟 上限={KB}KB 仅工作时间段={Wt}",
+                        _shotCfg.Enabled, _shotCfg.IntervalMin, _shotCfg.MaxKB, _shotCfg.WorkTimeOnly);
                 }
                 else
                 {
