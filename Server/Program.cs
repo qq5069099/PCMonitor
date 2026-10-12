@@ -279,13 +279,31 @@ app.UseStaticFiles(new StaticFileOptions
 
 // ─── 自动更新：计算客户端 exe 的 MD5 ──────────────────────────
 var clientExePath = Path.Combine(AppContext.BaseDirectory, "wwwroot", "PCMonitorClient.exe");
-var clientMd5 = File.Exists(clientExePath) ? Utility.Md5File(Path.Combine(AppContext.BaseDirectory, "wwwroot", "PCMonitorClient.exe")) : "";
+// MD5 按文件修改时间缓存：替换 wwwroot 里的客户端 exe 后无需重启服务即可生效
+// （直接在启动时算一次的老做法会让新客户端永远发不出去，直到手工重启）
+DateTime clientMd5Stamp = DateTime.MinValue;
+var clientMd5 = "";
+string GetClientMd5()
+{
+    try
+    {
+        var fi = new FileInfo(clientExePath);
+        if (!fi.Exists) { clientMd5Stamp = DateTime.MinValue; clientMd5 = ""; return clientMd5; }
+        if (fi.LastWriteTimeUtc == clientMd5Stamp && clientMd5.Length > 0) return clientMd5;
+        clientMd5 = Utility.Md5File(clientExePath);
+        clientMd5Stamp = fi.LastWriteTimeUtc;
+        Console.WriteLine($"[更新] 客户端 exe 已变更，新 MD5 = {clientMd5}");
+        return clientMd5;
+    }
+    catch { return clientMd5; }
+}
 app.MapGet("/update/check", (HttpContext ctx) =>
 {
+    var md5 = GetClientMd5();
     return Results.Json(new
     {
-        md5 = clientMd5,
-        url = string.IsNullOrEmpty(clientMd5) ? "" : $"{ctx.Request.Scheme}://{ctx.Request.Host}/PCMonitorClient.exe"
+        md5,
+        url = string.IsNullOrEmpty(md5) ? "" : $"{ctx.Request.Scheme}://{ctx.Request.Host}/PCMonitorClient.exe"
     });
 });
 

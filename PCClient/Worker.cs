@@ -11,7 +11,7 @@ public sealed class Worker : BackgroundService
 {
     // ═══════════════ 配置（直接修改这里）═══════════════
     private const string DefaultServerUrl = "ws://fjwqgame.com:999/ws";
-    private const string Version = "v1.0.8.2";
+    private const string Version = "v1.0.8.3";
 
     private const int DefaultFps = 5;
     private const int DefaultJpegQuality = 55;
@@ -52,6 +52,11 @@ public sealed class Worker : BackgroundService
         _screenshotQuality = Math.Clamp(configuration.GetValue("ScreenshotQuality", DefaultScreenshotQuality), 1, 100);
         _screenshotMaxBytes = Math.Clamp(configuration.GetValue("ScreenshotMaxBytes", DefaultScreenshotMaxBytes), 30 * 1024, 4 * 1024 * 1024);
         _screenshotIntervalMinutes = Math.Clamp(configuration.GetValue("ScreenshotIntervalMinutes", DefaultScreenshotIntervalMinutes), 1, 60);
+
+        // 没有 appsettings.json 的部署（例如只放 exe 的目录）WorkPeriods 会为空，
+        // 这里明确提示：定时截图会全天上传，离岗告警不会触发
+        if (_workPeriods.Length == 0)
+            _log.LogWarning("未配置 WorkPeriods：定时截图将全天上传（不受工作时间段限制），离岗告警也不会触发");
     }
 
     protected override async Task ExecuteAsync(CancellationToken ct)
@@ -97,25 +102,49 @@ public sealed class Worker : BackgroundService
                 var cfg = await FetchShotConfigAsync(httpBase, ct);
                 if (!cfg.Enabled || ct.IsCancellationRequested) continue;
                 // 仅工作时间段内上传
-                if (!ScreenCapture.IsWorkPeriod(_workPeriods)) continue;
+                if (!InShotWindow()) continue;
 
-                await CaptureAndUploadAsync(httpBase, cfg, ct);
+                var jpeg = CaptureShot(cfg);
+                if (jpeg == null) continue;
+                await UploadWithRetryAsync(httpBase, jpeg, cfg, ct);
             }
             catch (OperationCanceledException) { break; }
             catch (Exception ex) { _log.LogWarning("定时截图异常: {Msg}", ex.Message); }
         }
     }
 
-    // 距离下一个整分（分钟数能被间隔整除）的等待时长；每轮重新计算，免疫系统时间调整
+    /// <summary>
+    /// 距离下一个"间隔窗口内的随机时刻"的等待时长。
+    /// 窗口起点是分钟数能被间隔整除的整分；在窗口内**随机**取一个秒数，
+    /// 避免所有机器都卡在 :00 秒同时上传造成拥堵。每轮重新计算，免疫系统时间调整。
+    /// </summary>
     private static TimeSpan DelayToNextShotMoment(int intervalMin)
     {
         var interval = Math.Clamp(intervalMin, 1, 60);
+        var windowSec = interval * 60;
         var now = DateTime.Now;
-        var next = new DateTime(now.Year, now.Month, now.Day, now.Hour, now.Minute, 0).AddMinutes(1);
-        while (next.Minute % interval != 0) next = next.AddMinutes(1);
-        var wait = next - now;
-        return wait < TimeSpan.Zero ? TimeSpan.Zero : wait;
+
+        // 当前窗口起点
+        var start = new DateTime(now.Year, now.Month, now.Day, now.Hour, now.Minute, 0);
+        while (start.Minute % interval != 0) start = start.AddMinutes(-1);
+
+        // 窗口内随机偏移，两端各留 5 秒余量，避免压到相邻窗口
+        const int margin = 5;
+        var latest = Math.Max(margin + 1, windowSec - margin);
+        var target = start.AddSeconds(Random.Shared.Next(margin, latest));
+        while (target <= now)   // 本窗口的随机时刻已过 → 顺延到下一个窗口再随机
+        {
+            start = start.AddMinutes(interval);
+            target = start.AddSeconds(Random.Shared.Next(margin, latest));
+        }
+        return target - now;
     }
+
+    /// <summary>
+    /// 是否允许上传截图。未配置 WorkPeriods 时视为全天允许 ——
+    /// 否则只放了 exe、没有 appsettings.json 的客户端会永远不上传（静默失败）。
+    /// </summary>
+    private bool InShotWindow() => _workPeriods.Length == 0 || ScreenCapture.IsWorkPeriod(_workPeriods);
 
     // 服务器为该机下发的截图配置
     private readonly struct ShotConfig
@@ -147,27 +176,61 @@ public sealed class Worker : BackgroundService
         }
     }
 
-    private async Task CaptureAndUploadAsync(string httpBase, ShotConfig cfg, CancellationToken ct)
+    // 截图：多屏拼接为同一张图 + JPEG 压缩；体积档位同时决定画质起点
+    private byte[]? CaptureShot(ShotConfig cfg)
     {
-        // 体积档位同时决定画质起点（档位越大越清晰），CaptureSnapshot 再保证不超上限
         var maxBytes = cfg.MaxKB > 0 ? Math.Clamp(cfg.MaxKB, 30, 4096) * 1024 : _screenshotMaxBytes;
         var (width, quality) = cfg.MaxKB > 0 ? PresetForKB(cfg.MaxKB) : (_screenshotMaxWidth, _screenshotQuality);
+        return ScreenCapture.CaptureSnapshot(width, quality, maxBytes);
+    }
 
-        var jpeg = ScreenCapture.CaptureSnapshot(width, quality, maxBytes);
-        if (jpeg is not { Length: > 0 }) return;
+    // 上传失败就重试，直到成功为止（退避 10/20/40/60 秒）；期间若开关被关掉则放弃
+    private async Task UploadWithRetryAsync(string httpBase, byte[] jpeg, ShotConfig cfg, CancellationToken ct)
+    {
+        var attempt = 0;
+        while (!ct.IsCancellationRequested)
+        {
+            if (await UploadShotAsync(httpBase, jpeg, ct))
+            {
+                _log.LogInformation("定时截图已上传（{KB} KB / 上限 {Max} KB / 每 {Min} 分钟{Extra}）",
+                    jpeg.Length / 1024, cfg.MaxKB, cfg.IntervalMin,
+                    attempt > 0 ? $"，失败 {attempt} 次后成功" : "");
+                return;
+            }
 
+            attempt++;
+            var waitSec = Math.Min(60, 10 * Math.Pow(2, Math.Min(attempt - 1, 3))); // 10/20/40/60…
+            _log.LogWarning("定时截图上传失败，{Sec} 秒后进行第 {N} 次重试", (int)waitSec, attempt);
+            try { await Task.Delay(TimeSpan.FromSeconds(waitSec), ct); } catch (OperationCanceledException) { return; }
+
+            // 重试前确认开关仍然打开，避免用户关掉后还在后台反复重发
+            if (!(await FetchShotConfigAsync(httpBase, ct)).Enabled)
+            {
+                _log.LogInformation("定时截图开关已关闭，放弃重试");
+                return;
+            }
+        }
+    }
+
+    // 单次上传，返回是否成功
+    private async Task<bool> UploadShotAsync(string httpBase, byte[] jpeg, CancellationToken ct)
+    {
         try
         {
             var pcId = Uri.EscapeDataString(Environment.MachineName);
             using var content = new ByteArrayContent(jpeg);
             content.Headers.ContentType = new MediaTypeHeaderValue("image/jpeg");
             using var resp = await _http.PostAsync($"{httpBase}/api/screenshot/upload?pcId={pcId}", content, ct);
-            if (resp.IsSuccessStatusCode)
-                _log.LogInformation("定时截图已上传（{KB} KB / 上限 {Max} KB / 每 {Min} 分钟）", jpeg.Length / 1024, maxBytes / 1024, cfg.IntervalMin);
-            else
-                _log.LogWarning("定时截图上传失败: HTTP {Code}", (int)resp.StatusCode);
+            if (resp.IsSuccessStatusCode) return true;
+            _log.LogWarning("定时截图上传失败: HTTP {Code}", (int)resp.StatusCode);
+            return false;
         }
-        catch (Exception ex) { _log.LogWarning("定时截图上传异常: {Msg}", ex.Message); }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            _log.LogWarning("定时截图上传异常: {Msg}", ex.Message);
+            return false;
+        }
     }
 
     // 体积档位（KB）→ (每屏像素宽, JPEG 起始质量)：档位越大分辨率与画质越高；
