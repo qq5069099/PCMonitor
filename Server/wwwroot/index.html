@@ -306,8 +306,11 @@
                 grid-column:1/-1;line-height:1.6}
 
     /* ── 截图大图查看 ── */
+    /* touch-action:none 覆盖整个大图层（含顶部工具栏）：
+       否则双指落在工具栏上时浏览器会去缩放整个页面，左右两个翻页按钮会被挤出屏幕 */
     #shotViewer{display:none;position:fixed;inset:0;background:rgba(0,0,0,.94);
-                z-index:400;flex-direction:column}
+                z-index:400;flex-direction:column;touch-action:none;
+                overscroll-behavior:contain}
     #shotViewer.show{display:flex}
     #shotViewerBar{display:flex;align-items:center;gap:10px;padding:8px 14px;
                    color:#cfd;font-size:13px;flex-shrink:0}
@@ -329,8 +332,11 @@
     .svNav{position:absolute;top:50%;transform:translateY(-50%);z-index:2;
            background:rgba(20,20,45,.85);border:1px solid #2a2a55;color:#dde;
            font-size:22px;line-height:1;padding:12px 10px;border-radius:8px;
-           cursor:pointer;min-width:46px;text-align:center}
+           cursor:pointer;min-width:46px;text-align:center;
+           transition:opacity .18s}
     .svNav:hover{border-color:#5cf0b8;color:#5cf0b8}
+    /* 放大查看时隐藏翻页按钮（避免挡住放大的画面、也避免误触），缩回默认大小再出现 */
+    #shotViewerBody.zoomed .svNav{opacity:0;pointer-events:none}
     #svPrev{left:8px}
     #svNext{right:8px}
   </style>
@@ -1173,6 +1179,7 @@ function openShotViewer(i){
   shotsIdx = i;
   document.getElementById('shotViewer').classList.add('show');
   document.body.style.overflow = 'hidden';   // 看大图时锁住页面滚动
+  syncShotViewerToViewport();                // 若页面已被浏览器放大，把大图层钉回可视视口
   updateShotViewer();
 }
 
@@ -1197,6 +1204,7 @@ function stepShot(delta){
 
 function closeShotViewer(){
   document.getElementById('shotViewer').classList.remove('show');
+  syncShotViewerToViewport();          // 关闭时清掉反向缩放
   resetShotZoom();
   svPointers.clear(); svPan = null; svPinch = null;
   document.body.style.overflow = '';
@@ -1228,6 +1236,8 @@ function applyShotZoom(){
   const img = svImg();
   img.style.transform = `translate(${svTx}px, ${svTy}px) scale(${svScale})`;
   img.style.cursor = svScale > 1 ? 'grab' : 'zoom-in';
+  // 放大时隐藏「上一张/下一张」按钮，缩回默认大小才显示
+  svBody().classList.toggle('zoomed', svScale > 1);
 }
 
 // 不让图片被拖出可视范围
@@ -1341,6 +1351,33 @@ window.addEventListener('resize', () => {
   measureShotBase();
   resetShotZoom();
 });
+
+// 兜底一：有些内置浏览器（微信 / 部分安卓 WebView）不完整支持 touch-action，
+// 双指会被当成"缩放整个页面"。这里在覆层内拦住触摸默认行为；只拦浏览器手势，不影响 pointer 事件。
+const _svOverlay = document.getElementById('shotViewer');
+_svOverlay.addEventListener('touchmove', e => { if (svShown()) e.preventDefault(); }, { passive: false });
+_svOverlay.addEventListener('gesturestart', e => { if (svShown()) e.preventDefault(); });  // iOS Safari 双指手势
+_svOverlay.addEventListener('dblclick', e => e.preventDefault()); // 避免双击触发页面缩放
+
+// 兜底二：万一浏览器还是把整页放大了，就把大图层反向缩放、钉回"可视视口"，
+// 保证左右两个翻页按钮始终留在屏幕内（scale<=1 时不做任何事，桌面端不受影响）。
+function syncShotViewerToViewport(){
+  const vv = window.visualViewport;
+  const el = _svOverlay;
+  if (!vv || !svShown() || vv.scale <= 1.01){
+    el.style.transform = ''; el.style.transformOrigin = '';
+    el.style.width = ''; el.style.height = '';
+    return;
+  }
+  el.style.transformOrigin = '0 0';
+  el.style.transform = `translate(${vv.offsetLeft}px, ${vv.offsetTop}px) scale(${1 / vv.scale})`;
+  el.style.width  = (vv.width  * vv.scale) + 'px';
+  el.style.height = (vv.height * vv.scale) + 'px';
+}
+if (window.visualViewport){
+  window.visualViewport.addEventListener('resize', syncShotViewerToViewport);
+  window.visualViewport.addEventListener('scroll', syncShotViewerToViewport);
+}
 
 // 大图查看时的键盘操作：← 上一张（更早）、→ 下一张（更晚）、0 复位缩放、Esc 关闭
 document.addEventListener('keydown', e => {
