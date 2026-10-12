@@ -93,6 +93,37 @@
     .settingRow select{width:100%;background:#111125;border:1px solid #262650;
       color:#eef;padding:7px 10px;border-radius:6px;font-size:13px;cursor:pointer}
     .settingRow select:focus{outline:none;border-color:#5cf0b8}
+
+    /* ── 只读展示字段 + 右侧 ✏️ 编辑按钮（点开弹框改，压缩面板高度）── */
+    .fieldRow{display:flex;gap:6px;align-items:stretch}
+    .fieldRow input[type=text]{flex:1;min-width:0;text-align:left}
+    .settingRow input[type=text][readonly]{background:#15152c;color:#ccd;cursor:default}
+    .settingRow input[type=text][readonly]:focus{border-color:#262650}
+    .penBtn{flex-shrink:0;min-width:44px;background:#111125;border:1px solid #262650;
+            color:#aab;border-radius:6px;font-size:15px;cursor:pointer;line-height:1;
+            transition:border-color .15s,background .15s,color .15s;
+            -webkit-tap-highlight-color:transparent}
+    .penBtn:hover,.penBtn:active{border-color:#5cf0b8;background:#0e2a1e;color:#5cf0b8}
+
+    /* ── 通用编辑弹框（备注名 / 定时锁定）── */
+    #editMask{display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);
+              z-index:220;align-items:center;justify-content:center;padding:12px}
+    #editMask.show{display:flex}
+    #editBox{background:#1a1a34;border:1px solid #262650;border-radius:14px;
+             padding:20px 18px;width:100%;max-width:320px;
+             max-height:calc(100vh - 24px);overflow-y:auto;
+             -webkit-overflow-scrolling:touch;text-align:left}
+    #editBox h3{font-size:14px;color:#5cf0b8;margin-bottom:8px;text-align:center}
+    #editBox .editHint{font-size:11px;color:#778;margin-bottom:12px;line-height:1.5}
+    #editInput{width:100%;background:#111125;border:1px solid #262650;color:#eef;
+               padding:10px;border-radius:6px;font-size:14px;text-align:center}
+    #editInput:focus{outline:none;border-color:#5cf0b8}
+    .editBtns{display:flex;gap:10px;margin-top:16px}
+    .editBtns button{flex:1;padding:10px 0;border-radius:7px;font-size:13px;cursor:pointer}
+    .editOk{background:#0e2a1e;border:1px solid #5cf0b8;color:#5cf0b8}
+    .editOk:active{background:#1a4030}
+    .editCancel{background:#111125;border:1px solid #262650;color:#aab}
+    .editCancel:active{background:#1a1a34;color:#eef}
     .ctrlBtn{display:block;width:100%;padding:10px 0;margin-bottom:8px;
              border:1px solid #262650;border-radius:8px;background:#111125;
              color:#eef;font-size:13px;cursor:pointer;transition:border-color .15s,background .15s}
@@ -328,25 +359,43 @@
     <div id="settingsPanel">
       <h3>⚙️ 设置</h3>
       <div class="settingRow">
-        <label>PC 备注名（留空则使用原名）</label>
-        <input type="text" id="remarkInput" placeholder="自定义名称..."/>
+        <label>PC 备注名</label>
+        <div class="fieldRow">
+          <input type="text" id="remarkInput" readonly placeholder="未设置"/>
+          <button class="penBtn" onclick="openEdit('remark')" title="修改备注名">✏️</button>
+        </div>
       </div>
-      <button class="ctrlBtn" onclick="saveRemark()" style="margin-bottom:14px">💾 保存备注</button>
       <div class="settingRow">
-        <label>定时锁定时段（格式 HH:mm-HH:mm，可跨凌晨，留空关闭）</label>
-        <input type="text" id="scheduleLockInput" placeholder="如 23:30-07:00"/>
+        <label>定时锁定时段</label>
+        <div class="fieldRow">
+          <input type="text" id="scheduleLockInput" readonly placeholder="未设置"/>
+          <button class="penBtn" onclick="openEdit('scheduleLock')" title="设置定时锁定">✏️</button>
+        </div>
       </div>
-      <button class="ctrlBtn" onclick="saveScheduleLock()" style="margin-bottom:14px">⏰ 保存定时锁定</button>
       <button class="ctrlBtn" onclick="openShotCfg()" style="margin-bottom:14px">📷 定时截图设置</button>
-      <hr style="border:none;border-top:1px solid #1e1e40;margin-bottom:14px"/>
+      <hr style="border:none;border-top:1px solid #1e1e40;margin:18px 0"/>
       <button class="ctrlBtn" onclick="openRemoteInputMode()">🖱️ 远程控制</button>
       <button id="btnLock"   class="ctrlBtn danger" onclick="sendControl('lock_input')">🔒 锁定鼠标</button>
       <button id="btnUnlock" class="ctrlBtn" onclick="sendControl('unlock_input')">🔓 解锁鼠标</button>
-      <hr style="border:none;border-top:1px solid #1e1e40;margin-bottom:14px"/>
+      <!-- 与下方的危险操作拉开距离，避免误触 -->
+      <hr style="border:none;border-top:1px solid #1e1e40;margin:22px 0"/>
       <!-- <button id="btnLockScreen" class="ctrlBtn danger" onclick="sendControl('lock_screen')">💻 进入锁屏</button> -->
-      <button id="btnRestart" class="ctrlBtn danger" onclick="askCmdConfirm('restart','确认要强制重启该电脑？')" style="margin-top:6px">🔄 强制重启</button>
-      <button id="btnShutdown" class="ctrlBtn danger" onclick="askCmdConfirm('shutdown','确认要强制关机？\n关机后将无法远程唤醒！')" style="margin-top:6px">⚡ 强制关机</button>
+      <button id="btnRestart" class="ctrlBtn danger" onclick="askCmdConfirm('restart','确认要强制重启该电脑？')" style="margin-top:12px">🔄 强制重启</button>
+      <button id="btnShutdown" class="ctrlBtn danger" onclick="askCmdConfirm('shutdown','确认要强制关机？\n关机后将无法远程唤醒！')" style="margin-top:14px">⚡ 强制关机</button>
       <button class="cancelBtn" onclick="toggleSettings()">← 返回</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ 通用编辑弹框（备注名 / 定时锁定）══ -->
+<div id="editMask" onclick="closeEdit()">
+  <div id="editBox" onclick="event.stopPropagation()">
+    <h3 id="editTitle"></h3>
+    <p class="editHint" id="editHint"></p>
+    <input type="text" id="editInput" onkeydown="if(event.key==='Enter'){event.preventDefault();saveEdit();}"/>
+    <div class="editBtns">
+      <button class="editOk" onclick="saveEdit()">保存</button>
+      <button class="editCancel" onclick="closeEdit()">取消</button>
     </div>
   </div>
 </div>
@@ -739,6 +788,7 @@ function highlightQualityBtn(quality){
 }
 
 function cancelQuality(){
+  closeEdit();                          // 一并关掉备注/定时锁定的编辑弹框
   closeShotCfg();                       // 一并关掉截图配置弹框
   document.getElementById('qualityMask').classList.remove('show');
   pendingPcId = pendingPcName = null;
@@ -779,8 +829,7 @@ function toggleSettings(){
   document.getElementById('qualityContent').style.display = settingsOpen ? 'none'  : 'block';
   document.getElementById('settingsPanel').style.display  = settingsOpen ? 'block' : 'none';
   if (settingsOpen && pendingPcId){
-    document.getElementById('remarkInput').value = pcRemarks[pendingPcId] || '';
-    document.getElementById('scheduleLockInput').value = pcScheduleLocks[pendingPcId] || '';
+    syncPanelFields();
     document.getElementById('btnLock').textContent = !!pcLocked[pendingPcId] ? '✅ 已锁定，再次锁定' : '🔒 锁定鼠标';
     syncShotToggle(pendingPcId);
   }
@@ -796,8 +845,7 @@ function showAllScreensPcSettings(pcId, pcName){
   document.getElementById('qualityMask').classList.add('show');
   document.getElementById('qualityContent').style.display = 'none';
   document.getElementById('settingsPanel').style.display  = 'block';
-  document.getElementById('remarkInput').value = pcRemarks[pcId] || '';
-  document.getElementById('scheduleLockInput').value = pcScheduleLocks[pcId] || '';
+  syncPanelFields();
   document.getElementById('btnLock').textContent = !!pcLocked[pcId] ? '✅ 已锁定，再次锁定' : '🔒 锁定鼠标';
   syncShotToggle(pcId);
 }
@@ -813,38 +861,63 @@ function showOfflineSettings(pcId, pcName){
   // 直接显示设置面板，跳过画质选择
   document.getElementById('qualityContent').style.display = 'none';
   document.getElementById('settingsPanel').style.display  = 'block';
-  // 填充备注
-  document.getElementById('remarkInput').value = pcRemarks[pcId] || '';
-  document.getElementById('scheduleLockInput').value = pcScheduleLocks[pcId] || '';
+  syncPanelFields();   // 回填备注 / 定时锁定（只读展示）
   document.getElementById('btnLock').textContent = !!pcLocked[pcId] ? '✅ 已锁定，再次锁定' : '🔒 锁定鼠标';
   syncShotToggle(pcId);
 }
 
-function saveRemark(){
+// ── 备注名 / 定时锁定：只读展示 + 弹框编辑 ────────────────────
+// 把当前 PC 的备注、定时锁定回填到设置面板（只读）并刷新标题
+function syncPanelFields(){
   if (!pendingPcId) return;
-  const v = document.getElementById('remarkInput').value.trim();
-  if (ws && ws.readyState === WebSocket.OPEN)
-    ws.send(JSON.stringify({action:'setRemark', pcId: pendingPcId, remark: v}));
-  // 乐观更新本地缓存
-  if (v) pcRemarks[pendingPcId] = v;
-  else   delete pcRemarks[pendingPcId];
-  showToast('备注已保存');
-  // 刷新列表显示名
+  document.getElementById('remarkInput').value = pcRemarks[pendingPcId] || '';
+  document.getElementById('scheduleLockInput').value = pcScheduleLocks[pendingPcId] || '';
   document.getElementById('qualityPcName').textContent = getDisplayName(pendingPcId, pendingPcName);
 }
 
-function saveScheduleLock(){
+let editKind = null; // 'remark' | 'scheduleLock'
+function openEdit(kind){
   if (!pendingPcId) return;
-  const v = document.getElementById('scheduleLockInput').value.trim();
-  // 格式校验：空字符串表示取消，否则必须符合 HH:mm-HH:mm
-  if (v && !/^\d{1,2}:\d{2}-\d{1,2}:\d{2}$/.test(v)) {
-    showToast('格式错误，请填写 HH:mm-HH:mm（如 23:30-07:00）');
-    return;
+  editKind = kind;
+  const isRemark = kind === 'remark';
+  document.getElementById('editTitle').textContent = isRemark ? '✏️ 修改备注名' : '⏰ 定时锁定时段';
+  document.getElementById('editHint').textContent  = isRemark
+    ? '留空则显示原始机器名'
+    : '格式 HH:mm-HH:mm，可跨凌晨（如 23:30-07:00）；留空表示关闭定时锁定';
+  const input = document.getElementById('editInput');
+  input.value = isRemark ? (pcRemarks[pendingPcId] || '') : (pcScheduleLocks[pendingPcId] || '');
+  input.placeholder = isRemark ? '如：小燕子' : '如 23:30-07:00';
+  document.getElementById('editMask').classList.add('show');
+  setTimeout(() => input.focus(), 60);   // 手机上直接弹出键盘
+}
+
+function closeEdit(){
+  document.getElementById('editMask').classList.remove('show');
+  editKind = null;
+}
+
+function saveEdit(){
+  if (!pendingPcId || !editKind) return;
+  const v = document.getElementById('editInput').value.trim();
+
+  if (editKind === 'remark'){
+    if (ws && ws.readyState === WebSocket.OPEN)
+      ws.send(JSON.stringify({action:'setRemark', pcId: pendingPcId, remark: v}));
+    if (v) pcRemarks[pendingPcId] = v; else delete pcRemarks[pendingPcId]; // 乐观更新缓存
+    showToast('备注已保存');
+  } else {
+    // 格式校验：留空表示取消，否则必须符合 HH:mm-HH:mm
+    if (v && !/^\d{1,2}:\d{2}-\d{1,2}:\d{2}$/.test(v)){
+      showToast('格式错误，请填写 HH:mm-HH:mm（如 23:30-07:00）');
+      return;   // 不关弹框，方便直接改
+    }
+    if (ws && ws.readyState === WebSocket.OPEN)
+      ws.send(JSON.stringify({action:'setScheduleLock', pcId: pendingPcId, scheduleLock: v}));
+    pcScheduleLocks[pendingPcId] = v;
+    showToast(v ? `定时锁定已设为 ${v}` : '定时锁定已关闭');
   }
-  if (ws && ws.readyState === WebSocket.OPEN)
-    ws.send(JSON.stringify({action:'setScheduleLock', pcId: pendingPcId, scheduleLock: v}));
-  pcScheduleLocks[pendingPcId] = v;
-  showToast(v ? `定时锁定已设为 ${v}` : '定时锁定已关闭');
+  closeEdit();
+  syncPanelFields();
 }
 
 function sendControl(cmd){
@@ -1245,6 +1318,7 @@ window.addEventListener('resize', () => {
 
 // 大图查看时的键盘操作：← 上一张（更早）、→ 下一张（更晚）、0 复位缩放、Esc 关闭
 document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && document.getElementById('editMask').classList.contains('show')) { closeEdit(); return; }
   if (e.key === 'Escape' && document.getElementById('shotCfgMask').classList.contains('show')) { closeShotCfg(); return; }
   if (!document.getElementById('shotViewer').classList.contains('show')) return;
   if (e.key === 'Escape')          closeShotViewer();
