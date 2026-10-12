@@ -11,7 +11,7 @@ public sealed class Worker : BackgroundService
 {
     // ═══════════════ 配置（直接修改这里）═══════════════
     private const string DefaultServerUrl = "ws://fjwqgame.com:999/ws";
-    private const string Version = "v1.0.8.4";
+    private const string Version = "v1.0.8.5";
 
     private const int DefaultFps = 5;
     private const int DefaultJpegQuality = 55;
@@ -96,7 +96,7 @@ public sealed class Worker : BackgroundService
                 // 每轮拉一次配置（推送之外的兜底），拿到最新的间隔
                 _shotCfg = await FetchShotConfigAsync(httpBase, ct);
 
-                var wait = DelayToNextShotMoment(_shotCfg.IntervalMin);
+                var wait = DelayToNextWindowStart(_shotCfg.IntervalMin);
                 // 等待期间若服务器推来新配置，立刻重算（配置改动立即生效）
                 if (wait > TimeSpan.Zero && !await SleepOrConfigChangedAsync(wait, ct)) continue;
 
@@ -105,8 +105,19 @@ public sealed class Worker : BackgroundService
                 // 服务器可要求"仅工作时间段内上传"（默认要求）
                 if (!InShotWindow(cfg)) continue;
 
+                // ① 窗口起点先截图：截图时刻保持整齐（同一台机器每 N 分钟准时一张）
                 var jpeg = CaptureShot(cfg);
                 if (jpeg == null) continue;
+
+                // ② 拍完**不立即上传**：在窗口内随机等一段时间再传，把多台机器的上传流量打散
+                var uploadDelay = RandomUploadDelay(cfg.IntervalMin);
+                if (uploadDelay > TimeSpan.Zero && !await SleepOrConfigChangedAsync(uploadDelay, ct))
+                {
+                    // 等待期间配置有变动：开关被关就丢弃这张，否则按新配置照常上传
+                    if (!_shotCfg.Enabled) { _log.LogDebug("等待上传期间开关被关闭，丢弃本张截图"); continue; }
+                    cfg = _shotCfg;
+                }
+
                 await UploadWithRetryAsync(httpBase, jpeg, cfg, ct);
             }
             catch (OperationCanceledException) { break; }
@@ -126,30 +137,31 @@ public sealed class Worker : BackgroundService
     }
 
     /// <summary>
-    /// 距离下一个"间隔窗口内的随机时刻"的等待时长。
-    /// 窗口起点是分钟数能被间隔整除的整分；在窗口内**随机**取一个秒数，
-    /// 避免所有机器都卡在 :00 秒同时上传造成拥堵。每轮重新计算，免疫系统时间调整。
+    /// 距离下一个间隔窗口**起点**的等待时长：分钟数能被间隔整除的整分（如间隔 5 → :00 :05 :10）。
+    /// 截图固定在这个整齐的时刻拍；打散流量交给截图之后的随机上传延时。
+    /// 每轮重新计算，免疫系统时间调整。
     /// </summary>
-    private static TimeSpan DelayToNextShotMoment(int intervalMin)
+    private static TimeSpan DelayToNextWindowStart(int intervalMin)
+    {
+        var interval = Math.Clamp(intervalMin, 1, 60);
+        var now = DateTime.Now;
+        var next = new DateTime(now.Year, now.Month, now.Day, now.Hour, now.Minute, 0).AddMinutes(1);
+        while (next.Minute % interval != 0) next = next.AddMinutes(1);
+        var wait = next - now;
+        return wait < TimeSpan.Zero ? TimeSpan.Zero : wait;
+    }
+
+    /// <summary>
+    /// 截图后到上传之间的随机延时：在窗口内随机取一点（两端各留 5 秒，避免压到相邻窗口），
+    /// 把多台机器的上传流量打散，避免所有机器在同一秒挤在一起。
+    /// </summary>
+    private static TimeSpan RandomUploadDelay(int intervalMin)
     {
         var interval = Math.Clamp(intervalMin, 1, 60);
         var windowSec = interval * 60;
-        var now = DateTime.Now;
-
-        // 当前窗口起点
-        var start = new DateTime(now.Year, now.Month, now.Day, now.Hour, now.Minute, 0);
-        while (start.Minute % interval != 0) start = start.AddMinutes(-1);
-
-        // 窗口内随机偏移，两端各留 5 秒余量，避免压到相邻窗口
         const int margin = 5;
         var latest = Math.Max(margin + 1, windowSec - margin);
-        var target = start.AddSeconds(Random.Shared.Next(margin, latest));
-        while (target <= now)   // 本窗口的随机时刻已过 → 顺延到下一个窗口再随机
-        {
-            start = start.AddMinutes(interval);
-            target = start.AddSeconds(Random.Shared.Next(margin, latest));
-        }
-        return target - now;
+        return TimeSpan.FromSeconds(Random.Shared.Next(margin, latest));
     }
 
     /// <summary>

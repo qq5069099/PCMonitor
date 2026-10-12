@@ -60,7 +60,7 @@ Windows 专用 .NET 8 双进程解决方案（目标框架 `net8.0-windows`）�
 
 - 作为 `?role=pc` 连接 Server WebSocket，以本机机器名注册
 - 截图循环：当 `_streaming` 为 true 时，按 Server 要求的帧率/画质截图并以二进制帧发送（8字节客户端 UTC 时间戳 + JPEG 数据）
-- **定时截图归档循环**：`ExecuteAsync` 并行运行连接循环与 `RunScreenshotLoopAsync`。每个间隔窗口（分钟数能被间隔整除的整分为窗口起点）内**随机取一个时刻**上传，避免多台机器卡在同一秒拥堵；到点后按服务器配置（开关 / 是否仅工作时间段 / 间隔 / 档位）决定是否截图并 `POST /api/screenshot/upload`（裸 JPEG）。**上传失败会一直重试直到成功**（退避 10/20/40/60 秒，退避期间开关被关掉则放弃）。配置改动由服务器 WS 推送 `screenshot_config` 触发，`SleepOrConfigChangedAsync` 会打断当前等待立即重算 —— 设置即生效，PC 离线则等它上线时补推。客户端不落盘，节奏不受 WS 断线重连影响
+- **定时截图归档循环**：`ExecuteAsync` 并行运行连接循环与 `RunScreenshotLoopAsync`。时序分两步：`DelayToNextWindowStart` 让**截图固定在每个间隔窗口的起点**（分钟数能被间隔整除的整分，如间隔 5 → :00 :05 :10）拍，保证截图时刻整齐；`RandomUploadDelay` 让**拍完不立即上传**，而是等窗口内一段随机时长（两端各留 5 秒，如 5 分钟窗口即 5~295 秒）再 `POST /api/screenshot/upload`（裸 JPEG）——截图时刻整齐、上传流量打散，避免多台机器挤在同一秒。到点后按服务器配置（开关 / 是否仅工作时间段 / 间隔 / 档位）决定是否截图。**上传失败会一直重试直到成功**（退避 10/20/40/60 秒，退避期间开关被关掉则放弃）。配置改动由服务器 WS 推送 `screenshot_config` 触发，`SleepOrConfigChangedAsync` 会打断当前等待立即重算 —— 设置即生效，PC 离线则等它上线时补推。客户端不落盘，节奏不受 WS 断线重连影响
   - 时段判断 `InShotWindow(cfg)`：服务器勾了「仅工作时间段」才判断 `WorkPeriods`；**未配置 WorkPeriods 时视为全天允许**（否则只放 exe、没有 appsettings.json 的客户端会永远静默不上传）
 - **ScreenCapture**（静态类）：支持多显示器 —— 通过 `Graphics.CopyFromScreen` 捕获所有屏幕，等比缩放后水平拼接为单张 JPEG。在拼接图上绘制黄色圆圈 + 十字准星光标覆盖层及空闲时长标签。在远程控制模式下（收到控制指令后 60 秒内）改绘标准箭头光标。空闲检测采用 60 秒滑动窗口 + 反作弊机制（要求 60 秒内至少有 6 次不同的真实移动，每次位移超过 30px）
   - `Capture(maxWidthPerScreen, quality, isControlMode)`：实时推流用，不限制体积
