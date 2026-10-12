@@ -1245,6 +1245,7 @@ window.addEventListener('resize', () => {
 
 // 大图查看时的键盘操作：← 上一张（更早）、→ 下一张（更晚）、0 复位缩放、Esc 关闭
 document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && document.getElementById('shotCfgMask').classList.contains('show')) { closeShotCfg(); return; }
   if (!document.getElementById('shotViewer').classList.contains('show')) return;
   if (e.key === 'Escape')          closeShotViewer();
   else if (e.key === 'ArrowLeft')  stepShot(-1);
