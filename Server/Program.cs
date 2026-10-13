@@ -70,7 +70,10 @@ if (pcsData != null)
         var screenshotMaxKB = NormalizeShotMaxKB(obj["screenshotMaxKB"]?.GetValue<int>() ?? 300);
         var screenshotIntervalMin = NormalizeShotInterval(obj["screenshotIntervalMin"]?.GetValue<int>() ?? 5);
         var screenshotWorkTimeOnly = obj["screenshotWorkTimeOnly"]?.GetValue<bool>() ?? true;
-        pcs[id] = new PCObject { Id = id, Name = name, Locked = locked, Remark = remark, ScheduleLock = scheduleLock, ScreenshotUpload = screenshotUpload, ScreenshotMaxKB = screenshotMaxKB, ScreenshotIntervalMin = screenshotIntervalMin, ScreenshotWorkTimeOnly = screenshotWorkTimeOnly };
+        // 档位对应的截图起始分辨率/质量（老数据没有这两个键 → 0 = 未指定，PC 端用自身默认）
+        var screenshotWidth   = NormalizeShotWidth(obj["screenshotWidth"]?.GetValue<int>() ?? 0);
+        var screenshotQuality = NormalizeShotQuality(obj["screenshotQuality"]?.GetValue<int>() ?? 0);
+        pcs[id] = new PCObject { Id = id, Name = name, Locked = locked, Remark = remark, ScheduleLock = scheduleLock, ScreenshotUpload = screenshotUpload, ScreenshotMaxKB = screenshotMaxKB, ScreenshotIntervalMin = screenshotIntervalMin, ScreenshotWorkTimeOnly = screenshotWorkTimeOnly, ScreenshotWidth = screenshotWidth, ScreenshotQuality = screenshotQuality };
     }
 }
 if (pcsKeyNormalized) Console.WriteLine("[DB] 已去除 pcs 子对象中 pc_ 前缀");
@@ -321,6 +324,8 @@ app.MapGet("/api/screenshot/config", (HttpContext ctx) =>
         enabled = pc?.ScreenshotUpload ?? false,
         maxKB = pc?.ScreenshotMaxKB ?? 300,           // 单张截图体积上限（KB）
         intervalMin = pc?.ScreenshotIntervalMin ?? 5, // 上传间隔（分钟）
+        width = pc?.ScreenshotWidth ?? 0,             // 档位对应的起始分辨率（0=PC 端用自身默认）
+        quality = pc?.ScreenshotQuality ?? 0,
         workTimeOnly = pc?.ScreenshotWorkTimeOnly ?? true // 是否仅工作时间段内上传
     });
 });
@@ -584,7 +589,7 @@ async Task HandlePcAsync(WebSocket ws)
                     if (interestedViewers.Length > 0)
                     {
                         var best = interestedViewers.OrderByDescending(v => v.Quality).First();
-                        await NotifyPcStartAsync(pcId, best.Quality, best.Fps);
+                        await NotifyPcStartAsync(pcId, best.Quality, best.Fps, best.MaxWidth);
                     }
 
                     // PC 重连后检查定时锁定时段，计算当前是否应处于锁定状态
@@ -684,9 +689,12 @@ async Task HandleViewerAsync(WebSocket ws, ViewerSession session)
                 viewer.WatchingPcIds.Add(newPcId);
                 int quality = doc.RootElement.TryGetProperty("quality", out var qProp) ? qProp.GetInt32() : 55;
                 int fps = doc.RootElement.TryGetProperty("fps", out var fProp) ? fProp.GetInt32() : 2;
+                // 画质档位对应的每屏像素宽：前端档位表推导后下发，服务端只透传
+                int maxWidth = doc.RootElement.TryGetProperty("maxWidth", out var mwProp) ? mwProp.GetInt32() : 0;
                 viewer.Quality = quality;
                 viewer.Fps = fps;
-                await NotifyPcStartAsync(newPcId, quality, fps);
+                viewer.MaxWidth = maxWidth;
+                await NotifyPcStartAsync(newPcId, quality, fps, maxWidth);
             }
             else if (action == "watchAll")
             {
@@ -697,15 +705,18 @@ async Task HandleViewerAsync(WebSocket ws, ViewerSession session)
 
                 int quality = doc.RootElement.TryGetProperty("quality", out var qProp) ? qProp.GetInt32() : 55;
                 int fps = doc.RootElement.TryGetProperty("fps", out var fProp) ? fProp.GetInt32() : 2;
+                // 画质档位对应的每屏像素宽：前端档位表推导后下发，服务端只透传
+                int maxWidth = doc.RootElement.TryGetProperty("maxWidth", out var mwProp) ? mwProp.GetInt32() : 0;
                 viewer.Quality = quality;
                 viewer.Fps = fps;
+                viewer.MaxWidth = maxWidth;
                 viewer.IsWatchingAll = true;
                 viewer.ExcludedPcIds.Clear(); // 重新进入全屏模式时清除临时排除列表
 
                 foreach (var p in pcs.Values.Where(p => p.IsOnline && CanAccessPc(viewer, p.Id)))
                 {
                     viewer.WatchingPcIds.Add(p.Id);
-                    await NotifyPcStartAsync(p.Id, quality, fps);
+                    await NotifyPcStartAsync(p.Id, quality, fps, maxWidth);
                 }
             }
             else if (action == "unwatch")
@@ -788,6 +799,10 @@ async Task HandleViewerAsync(WebSocket ws, ViewerSession session)
                         suTarget.ScreenshotMaxKB = NormalizeShotMaxKB(kb);
                     if (doc.RootElement.TryGetProperty("intervalMin", out var ivProp) && ivProp.TryGetInt32(out var iv))
                         suTarget.ScreenshotIntervalMin = NormalizeShotInterval(iv);
+                    if (doc.RootElement.TryGetProperty("width", out var wProp) && wProp.TryGetInt32(out var wpx))
+                        suTarget.ScreenshotWidth = NormalizeShotWidth(wpx);
+                    if (doc.RootElement.TryGetProperty("quality", out var sqProp) && sqProp.TryGetInt32(out var sq))
+                        suTarget.ScreenshotQuality = NormalizeShotQuality(sq);
                     if (doc.RootElement.TryGetProperty("workTimeOnly", out var wtProp)
                         && (wtProp.ValueKind == JsonValueKind.True || wtProp.ValueKind == JsonValueKind.False))
                         suTarget.ScreenshotWorkTimeOnly = wtProp.GetBoolean();
@@ -857,10 +872,13 @@ bool IsShotDate(string s) => System.Text.RegularExpressions.Regex.IsMatch(s ?? "
 bool IsShotName(string s) => System.Text.RegularExpressions.Regex.IsMatch(s ?? "", @"^\d{6}\.jpg$");
 
 // 单张截图体积档位（KB），与前端"勾选一项"的选项保持一致；其它值一律回落默认 300
-int NormalizeShotMaxKB(int kb) => kb is 100 or 200 or 300 or 500 or 800 ? kb : 300;
+int NormalizeShotMaxKB(int kb) => Math.Clamp(kb, 1, 4096);  // 护栏：档位由 index.html 决定
 
-// 上传间隔（分钟），与前端下拉框的选项保持一致；其它值一律回落默认 5
-int NormalizeShotInterval(int min) => min is >= 1 and <= 6 ? min : 5;
+// ⚠ 可选值清单只存在于 wwwroot/index.html（上传间隔 / 体积档位 / 画质档位）。
+// 服务端这里只做「合理性护栏」，不再列举合法值——前端加一个选项不必重发服务器。
+int NormalizeShotInterval(int min) => Math.Clamp(min, 1, 1440);              // 1 分钟 ~ 1 天
+int NormalizeShotWidth(int px)     => px <= 0 ? 0 : Math.Clamp(px, 320, 3840); // 0 = 未指定，PC 端用自身默认
+int NormalizeShotQuality(int q)    => q <= 0 ? 0 : Math.Clamp(q, 1, 100);
 
 // 列出该 PC 已有截图的日期（倒序，最新在前）
 List<string> ListShotDates(string pcId)
@@ -909,10 +927,12 @@ async Task NotifyPcAsync(string pcId, string command)
     await SafeSendTextAsync(pc.Socket!, JsonSerializer.Serialize(new { command }));
 }
 
-async Task NotifyPcStartAsync(string pcId, int quality, int fps)
+// maxWidth：画质档位对应的每屏像素宽，由前端 index.html 的档位表推导并下发；
+// 0 = 前端没给（老版本页面），PC 端按 quality 自行推导，保证兼容
+async Task NotifyPcStartAsync(string pcId, int quality, int fps, int maxWidth = 0)
 {
     if (!pcs.TryGetValue(pcId, out var pc) || !pc.IsOnline) return;
-    await SafeSendTextAsync(pc.Socket!, JsonSerializer.Serialize(new { command = "start", quality, fps }));
+    await SafeSendTextAsync(pc.Socket!, JsonSerializer.Serialize(new { command = "start", quality, fps, maxWidth }));
 }
 
 // 把该机的定时截图配置实时推给 PC —— 改动立即生效；
@@ -926,6 +946,8 @@ async Task PushShotConfigAsync(string pcId)
         enabled = pc.ScreenshotUpload,
         maxKB = pc.ScreenshotMaxKB,
         intervalMin = pc.ScreenshotIntervalMin,
+        width = pc.ScreenshotWidth,       // 档位对应的起始分辨率，PC 端直接用
+        quality = pc.ScreenshotQuality,
         workTimeOnly = pc.ScreenshotWorkTimeOnly
     }));
 }
@@ -968,7 +990,7 @@ async Task SendPcListAsync(ViewerEntry viewer)
     if (viewer.AllowedPcIds != null)
         allowedPcs = allowedPcs.Where(p => viewer.AllowedPcIds.Contains(p.Id));
     var list = allowedPcs
-        .Select(p => new { p.Id, p.Name, p.Remark, Online = p.IsOnline, p.Locked, p.Version, p.ScheduleLock, p.ScreenshotUpload, p.ScreenshotMaxKB, p.ScreenshotIntervalMin, p.ScreenshotWorkTimeOnly })
+        .Select(p => new { p.Id, p.Name, p.Remark, Online = p.IsOnline, p.Locked, p.Version, p.ScheduleLock, p.ScreenshotUpload, p.ScreenshotMaxKB, p.ScreenshotIntervalMin, p.ScreenshotWorkTimeOnly, p.ScreenshotWidth, p.ScreenshotQuality })
         .OrderByDescending(p => p.Online)
         .ThenBy(p => p.Name)
         .ToList();
@@ -1028,8 +1050,10 @@ class PCObject
     public bool Locked { get; set; } = false;
     public string ScheduleLock { get; set; } = ""; // 定时锁定时段，格式 "HH:mm-HH:mm"，可跨越0点
     public bool ScreenshotUpload { get; set; } = false; // 是否每 5 分钟上传定时截图（默认关闭）
-    public int ScreenshotMaxKB { get; set; } = 300; // 单张截图体积上限（KB），档位 100/200/300/500/800
-    public int ScreenshotIntervalMin { get; set; } = 5; // 上传间隔（分钟），可选 1-6
+    public int ScreenshotMaxKB { get; set; } = 300; // 单张截图体积上限（KB），档位见 index.html
+    public int ScreenshotIntervalMin { get; set; } = 5; // 上传间隔（分钟），可选值见 index.html
+    public int ScreenshotWidth { get; set; } = 0;   // 该档位下 PC 端截图起始像素宽（0=未指定，用 PC 自身默认）
+    public int ScreenshotQuality { get; set; } = 0; // 该档位下 PC 端 JPEG 起始质量（0=未指定）
     public bool ScreenshotWorkTimeOnly { get; set; } = true; // 是否仅在客户端配置的工作时间段内上传（默认是）
     public bool IsLockActive { get; set; } = false; // 当前是否处于定时锁定状态
     public WebSocket? Socket { get; set; } = null;
@@ -1045,6 +1069,7 @@ class ViewerEntry
     public HashSet<string> ExcludedPcIds { get; } = new();
     public bool IsWatchingAll { get; set; } = false;
     public int Quality { get; set; } = 55;
+    public int MaxWidth { get; set; } = 0; // 画质档位对应的每屏像素宽（0=不指定，PC 端按 quality 自行推导）
     public int Fps { get; set; } = 2;
     public SemaphoreSlim SendLock { get; } = new(1, 1);
 }

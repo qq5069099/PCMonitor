@@ -11,7 +11,7 @@ public sealed class Worker : BackgroundService
 {
     // ═══════════════ 配置（直接修改这里）═══════════════
     private const string DefaultServerUrl = "ws://fjwqgame.com:999/ws";
-    private const string Version = "v1.0.8.5";
+    private const string Version = "v1.0.8.6";
 
     private const int DefaultFps = 5;
     private const int DefaultJpegQuality = 55;
@@ -22,6 +22,15 @@ public sealed class Worker : BackgroundService
     private const int DefaultScreenshotQuality = 50;     // JPEG 起始质量
     private const int DefaultScreenshotMaxBytes = 300 * 1024; // 单张（含双屏拼接）不超过 300KB
     private const int DefaultScreenshotIntervalMinutes = 5;
+
+    // ⚠ 可选值清单只在服务器前端 wwwroot/index.html 里维护（间隔/档位/画质）。
+    // 客户端只做「合理性护栏」，不列举合法值——前端改选项不需要重发客户端 exe。
+    private const int MinIntervalMinutes = 1;      // 护栏下限
+    private const int MaxIntervalMinutes = 1440;   // 护栏上限（1 天）
+    private const int MinCaptureWidth = 320;       // 每屏像素宽护栏
+    private const int MaxCaptureWidth = 3840;
+    private static int SafeInterval(int min) =>
+        Math.Clamp(min <= 0 ? DefaultScreenshotIntervalMinutes : min, MinIntervalMinutes, MaxIntervalMinutes);
     // ════════════════════════════════════════════════════
 
     private readonly ILogger<Worker> _log;
@@ -31,7 +40,6 @@ public sealed class Worker : BackgroundService
     private readonly int _screenshotMaxWidth;
     private readonly int _screenshotQuality;
     private readonly int _screenshotMaxBytes;
-    private readonly int _screenshotIntervalMinutes;
     private volatile bool _streaming;
     private volatile int _quality = DefaultJpegQuality;
     private volatile int _interval = 1000 / DefaultFps;
@@ -51,7 +59,6 @@ public sealed class Worker : BackgroundService
         _screenshotMaxWidth = Math.Clamp(configuration.GetValue("ScreenshotMaxWidth", DefaultScreenshotMaxWidth), 320, 3840);
         _screenshotQuality = Math.Clamp(configuration.GetValue("ScreenshotQuality", DefaultScreenshotQuality), 1, 100);
         _screenshotMaxBytes = Math.Clamp(configuration.GetValue("ScreenshotMaxBytes", DefaultScreenshotMaxBytes), 30 * 1024, 4 * 1024 * 1024);
-        _screenshotIntervalMinutes = Math.Clamp(configuration.GetValue("ScreenshotIntervalMinutes", DefaultScreenshotIntervalMinutes), 1, 60);
 
         // 没有 appsettings.json 的部署（例如只放 exe 的目录）WorkPeriods 会为空，
         // 这里明确提示：定时截图会全天上传，离岗告警不会触发
@@ -82,7 +89,7 @@ public sealed class Worker : BackgroundService
     }
 
     // ─── 定时截图归档 ────────────────────────────────────────────
-    // 在"分钟数 % 间隔 == 0"的整分时刻触发（间隔 1-6 分钟，默认 5 → :00 :05 :10 …），
+    // 在"分钟数 % 间隔 == 0"的整分时刻触发（间隔由服务器下发，默认 5 → :00 :05 :10 …），
     // 仅工作时间段内执行，且需服务器端已为该机开启上传开关（默认关闭）
     private async Task RunScreenshotLoopAsync(CancellationToken ct)
     {
@@ -143,7 +150,7 @@ public sealed class Worker : BackgroundService
     /// </summary>
     private static TimeSpan DelayToNextWindowStart(int intervalMin)
     {
-        var interval = Math.Clamp(intervalMin, 1, 60);
+        var interval = SafeInterval(intervalMin);
         var now = DateTime.Now;
         var next = new DateTime(now.Year, now.Month, now.Day, now.Hour, now.Minute, 0).AddMinutes(1);
         while (next.Minute % interval != 0) next = next.AddMinutes(1);
@@ -157,7 +164,7 @@ public sealed class Worker : BackgroundService
     /// </summary>
     private static TimeSpan RandomUploadDelay(int intervalMin)
     {
-        var interval = Math.Clamp(intervalMin, 1, 60);
+        var interval = SafeInterval(intervalMin);
         var windowSec = interval * 60;
         const int margin = 5;
         var latest = Math.Max(margin + 1, windowSec - margin);
@@ -179,6 +186,9 @@ public sealed class Worker : BackgroundService
         public int MaxKB { get; init; }
         public int IntervalMin { get; init; } = 5;
         public bool WorkTimeOnly { get; init; } = true;
+        // 该体积档位对应的截图起始参数，由服务器按前端档位表下发；0 = 未指定（用本机默认）
+        public int Width { get; init; }
+        public int Quality { get; init; }
     }
 
     // 最近一次生效的截图配置：HTTP 拉取或服务器推送都会更新它
@@ -191,8 +201,12 @@ public sealed class Worker : BackgroundService
     {
         Enabled = root.TryGetProperty("enabled", out var ep) && ep.ValueKind == JsonValueKind.True,
         MaxKB = root.TryGetProperty("maxKB", out var kbp) && kbp.TryGetInt32(out var kb) ? kb : 0,
-        IntervalMin = root.TryGetProperty("intervalMin", out var ivp) && ivp.TryGetInt32(out var iv) && iv is >= 1 and <= 60
-                        ? iv : 5,
+        IntervalMin = root.TryGetProperty("intervalMin", out var ivp) && ivp.TryGetInt32(out var iv)
+                        ? SafeInterval(iv) : DefaultScreenshotIntervalMinutes,
+        Width = root.TryGetProperty("width", out var wp) && wp.TryGetInt32(out var w) && w > 0
+                        ? Math.Clamp(w, MinCaptureWidth, MaxCaptureWidth) : 0,
+        Quality = root.TryGetProperty("quality", out var qp2) && qp2.TryGetInt32(out var q2) && q2 > 0
+                        ? Math.Clamp(q2, 1, 100) : 0,
         // 老服务端不返回该字段时按"仅工作时间段"处理，保持原有行为
         WorkTimeOnly = !root.TryGetProperty("workTimeOnly", out var wtp) || wtp.ValueKind != JsonValueKind.False
     };
@@ -227,7 +241,10 @@ public sealed class Worker : BackgroundService
     private byte[]? CaptureShot(ShotConfig cfg)
     {
         var maxBytes = cfg.MaxKB > 0 ? Math.Clamp(cfg.MaxKB, 30, 4096) * 1024 : _screenshotMaxBytes;
-        var (width, quality) = cfg.MaxKB > 0 ? PresetForKB(cfg.MaxKB) : (_screenshotMaxWidth, _screenshotQuality);
+        // 服务器按前端档位表下发了起始参数就直接用；没有（未设置过的老机器）才按体积上限推算
+        var (width, quality) = cfg.Width > 0
+            ? (cfg.Width, cfg.Quality > 0 ? cfg.Quality : _screenshotQuality)
+            : cfg.MaxKB > 0 ? PresetForFbKB(cfg.MaxKB) : (_screenshotMaxWidth, _screenshotQuality);
         return ScreenCapture.CaptureSnapshot(width, quality, maxBytes);
     }
 
@@ -282,7 +299,12 @@ public sealed class Worker : BackgroundService
 
     // 体积档位（KB）→ (每屏像素宽, JPEG 起始质量)：档位越大分辨率与画质越高；
     // 上限由 CaptureSnapshot 兜底（桌面内容复杂时会自动降质/降分辨率，保证不超）
-    private static (int Width, int Quality) PresetForKB(int maxKB) => maxKB switch
+    /// <summary>
+    /// 兜底：服务器没给出档位参数时，按体积上限推算起始分辨率/质量。
+    /// 这只是老数据（未在页面上重新保存过档位）的兼容路径，正常都走服务器下发的 width/quality；
+    /// 用阈值累进而非枚举档位，因此前端新增任何 KB 档位都能工作，无需改客户端。
+    /// </summary>
+    private static (int Width, int Quality) PresetForFbKB(int maxKB) => maxKB switch
     {
         <= 100 => (1280, 50),
         <= 200 => (1600, 55),
@@ -574,9 +596,12 @@ public sealed class Worker : BackgroundService
                         _quality = Math.Clamp(qp.GetInt32(), 1, 100);
                     if (doc.RootElement.TryGetProperty("fps", out var fp))
                         _interval = Math.Max(200, 1000 / Math.Max(1, fp.GetInt32()));
-                    // 按画质档位动态调整截图宽度（每屏）：省流→800，均衡→1280，高清→1920，超清→2048，极清→2560
-                    // 高清(78%) 起步即 1920px 原生 1080p，不再降采样；极清支持 2K 原生分辨率
-                    _maxWidth = _quality <= 50 ? 800 : _quality <= 70 ? 1280 : _quality <= 83 ? 1920 : _quality < 100 ? 2048 : 2560;
+                    // 每屏截图宽度由服务器按前端画质档位表下发（maxWidth）；老页面没给才按质量推算
+                    var mw = doc.RootElement.TryGetProperty("maxWidth", out var mwp) && mwp.TryGetInt32(out var mv) ? mv : 0;
+                    _maxWidth = mw > 0
+                        ? Math.Clamp(mw, MinCaptureWidth, MaxCaptureWidth)
+                        // 兜底推算：与质量单调递增（省流 800 → 极清 2560），仅老页面走这里
+                        : Math.Clamp(800 + (_quality - 30) * (2560 - 800) / 70, MinCaptureWidth, MaxCaptureWidth);
                     _streaming = true;
                     _log.LogInformation("收到指令: {Cmd}，quality={Q} interval={I}ms", cmd, _quality, _interval);
                 }
