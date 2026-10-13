@@ -337,9 +337,11 @@
     .svBtn{background:none;border:1px solid #2a2a55;color:#dde;padding:5px 12px;
            border-radius:6px;cursor:pointer;font-size:13px}
     .svBtn:hover{border-color:#5cf0b8;color:#5cf0b8}
+    /* cursor:pointer 提示「图片外的空白处可点」（点了退回列表） */
     #shotViewerBody{flex:1;display:flex;align-items:center;justify-content:center;
                     overflow:hidden;position:relative;padding:0 8px 8px;
-                    touch-action:none;overscroll-behavior:contain;user-select:none}
+                    touch-action:none;overscroll-behavior:contain;user-select:none;
+                    cursor:pointer}
     /* z-index：图片带 transform 会成为独立层叠上下文，若不指定层级，
        按 DOM 顺序它会盖住写在前面的「上一张」按钮（只盖前面、不盖后面） */
     #shotViewerImg{max-width:100%;max-height:100%;object-fit:contain;
@@ -347,15 +349,17 @@
                    transform-origin:center center;will-change:transform;
                    cursor:zoom-in;-webkit-user-select:none;
                    position:relative;z-index:1}
-    #svHint{font-size:11px;color:#556;margin-left:10px;white-space:nowrap}
+    /* 文案变长后允许省略号收缩，别把标题和「x / y · KB」挤出去 */
+    #svHint{font-size:11px;color:#556;margin-left:10px;white-space:nowrap;
+            min-width:0;overflow:hidden;text-overflow:ellipsis}
     .svNav{position:absolute;top:50%;transform:translateY(-50%);z-index:2;
            background:rgba(20,20,45,.85);border:1px solid #2a2a55;color:#dde;
            font-size:22px;line-height:1;padding:12px 10px;border-radius:8px;
            cursor:pointer;min-width:46px;text-align:center;
            transition:opacity .18s}
     .svNav:hover{border-color:#5cf0b8;color:#5cf0b8}
-    /* 放大查看时隐藏翻页按钮（避免挡住放大的画面、也避免误触），缩回默认大小再出现 */
-    #shotViewerBody.zoomed .svNav{opacity:0;pointer-events:none}
+    /* 放大后翻页按钮也一直显示（z-index:2 保证浮在放大画面之上），方便继续翻别的图；
+       它们是 absolute 定位的，不参与拖动平移——按到按钮就是翻页，不会误当平移起点 */
     #svPrev{left:8px}
     #svNext{right:8px}
   </style>
@@ -539,7 +543,7 @@
   <div id="shotViewerBar">
     <button class="svBtn" onclick="closeShotViewer()">✕ 关闭</button>
     <span id="shotViewerTitle"></span>
-    <span id="svHint">滚轮 / 双指缩放 · 拖动平移 · 双击复位</span>
+    <span id="svHint">图片上滚轮缩放 · 空白处滚轮翻页 · 拖动平移 · 双击复位 · 点空白处返回</span>
     <span id="shotViewerInfo"></span>
   </div>
   <div id="shotViewerBody">
@@ -1296,7 +1300,7 @@ function closeShotViewer(){
   document.getElementById('shotViewer').classList.remove('show');
   syncShotViewerToViewport();          // 关闭时清掉反向缩放
   resetShotZoom();
-  svPointers.clear(); svPan = null; svPinch = null;
+  svPointers.clear(); svPan = null; svPinch = null; svTap = null;
   document.body.style.overflow = '';
   document.getElementById('shotViewerImg').removeAttribute('src');
 }
@@ -1305,13 +1309,22 @@ function closeShotViewer(){
 let svScale = 1, svTx = 0, svTy = 0;
 let svBase = { w: 0, h: 0 };        // 适应显示时的图片尺寸（未缩放）
 const SV_MAX_SCALE = 10;
+const SV_WHEEL_NAV_COOLDOWN = 180;  // ms：滚轮翻页冷却，避免一次滑动跳过多张
+const SV_TAP_SLOP = 6;              // px：位移小于它才算「点了一下」，超过就是拖动
 const svPointers = new Map();       // pointerId → {x,y}
 let svPan = null;                   // 单指/鼠标拖动起点
 let svPinch = null;                 // 双指缩放起点
+let svWheelNavTs = 0;               // 上次滚轮翻页时间，冷却期内不再翻页
+let svTap = null;                   // 按下起点 {id,x,y}，用于判断松手算不算点击
 
 function svBody(){ return document.getElementById('shotViewerBody'); }
 function svImg(){ return document.getElementById('shotViewerImg'); }
 function svShown(){ return document.getElementById('shotViewer').classList.contains('show'); }
+
+// 触屏设备只提示触摸手势：手机上既没有滚轮也没有 Ctrl，长文案还会把顶栏挤爆
+if (window.matchMedia('(hover:none) and (pointer:coarse)').matches){
+  document.getElementById('svHint').textContent = '双指缩放 · 拖动平移 · 双击复位 · 点空白处返回';
+}
 
 // 记录图片"适应窗口"时占用的尺寸，用于限制平移范围
 function measureShotBase(){
@@ -1325,9 +1338,7 @@ function measureShotBase(){
 function applyShotZoom(){
   const img = svImg();
   img.style.transform = `translate(${svTx}px, ${svTy}px) scale(${svScale})`;
-  img.style.cursor = svScale > 1 ? 'grab' : 'zoom-in';
-  // 放大时隐藏「上一张/下一张」按钮，缩回默认大小才显示
-  svBody().classList.toggle('zoomed', svScale > 1);
+  img.style.cursor = svScale > 1 ? 'grab' : 'zoom-in';   // 图片上滚轮 = 缩放，用 zoom-in 提示
 }
 
 // 不让图片被拖出可视范围
@@ -1357,12 +1368,29 @@ function zoomShotAt(clientX, clientY, factor){
   applyShotZoom();
 }
 
-// 滚轮缩放：passive:false + preventDefault，避免滚到底下的网页
-svBody().addEventListener('wheel', e => {
+// 滚轮按「光标位置」分工，没有隐藏状态：
+//   光标在图片上   → 缩放（以光标为锚点，往哪滚看哪；图片缩到适应大小后向下滚不再有反应）
+//   光标在图片外的空白 → 翻页（下滚 = 下一张 = 更早）
+//   Ctrl / ⌘ + 滚轮（含触控板双指捏合）→ 在哪儿都缩放，触控板捏合常在图片外发生
+// 监听挂在整个覆层上（不是只挂 #shotViewerBody）：顶栏、左右黑边、翻页按钮上滚都算「图片外」
+// passive:false + preventDefault，避免滚到底下的网页
+document.getElementById('shotViewer').addEventListener('wheel', e => {
   if (!svShown()) return;
   e.preventDefault();
-  const step = e.deltaMode === 1 ? 0.05 : 0.0015;   // 行模式 vs 像素模式
-  zoomShotAt(e.clientX, e.clientY, Math.exp(-e.deltaY * step));
+
+  if (e.ctrlKey || e.metaKey || svHitImage(e.clientX, e.clientY)){
+    const step = e.deltaMode === 1 ? 0.05 : 0.0015;   // 行模式 vs 像素模式
+    zoomShotAt(e.clientX, e.clientY, Math.exp(-e.deltaY * step));
+    return;
+  }
+
+  // 空白处：翻页，带冷却避免一次滑动跳过多张
+  const d = e.deltaY || e.deltaX;
+  if (!d) return;
+  const now = Date.now();
+  if (now - svWheelNavTs < SV_WHEEL_NAV_COOLDOWN) return;
+  svWheelNavTs = now;
+  stepShot(d > 0 ? 1 : -1);
 }, { passive: false });
 
 svBody().addEventListener('pointerdown', e => {
@@ -1371,6 +1399,8 @@ svBody().addEventListener('pointerdown', e => {
   if (e.target.closest('.svNav')) return;            // 不拦截翻页按钮
   try { svBody().setPointerCapture(e.pointerId); } catch(_) {}
   svPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  // 第一根手指/鼠标按下时记下起点；第二根手指进来就说明是双指操作，不算点击
+  svTap = svPointers.size === 1 ? { id: e.pointerId, x: e.clientX, y: e.clientY } : null;
 
   if (svPointers.size === 1 && svScale > 1) {
     svPan = { x: e.clientX, y: e.clientY, tx: svTx, ty: svTy };
@@ -1392,6 +1422,9 @@ svBody().addEventListener('pointerdown', e => {
 svBody().addEventListener('pointermove', e => {
   if (!svPointers.has(e.pointerId)) return;
   svPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  // 动过就不是点击（拖动平移、双指缩放都不该触发「点空白返回」）
+  if (svTap && svTap.id === e.pointerId &&
+      Math.hypot(e.clientX - svTap.x, e.clientY - svTap.y) > SV_TAP_SLOP) svTap = null;
   const r = svBody().getBoundingClientRect();
 
   if (svPinch && svPointers.size >= 2) {
@@ -1416,23 +1449,35 @@ svBody().addEventListener('pointermove', e => {
   }
 });
 
-function svEndPointer(e){
+// 松手点是否落在图片上（getBoundingClientRect 已含 transform，放大后同样准）
+function svHitImage(x, y){
+  const img = svImg();
+  if (!img.naturalWidth) return false;
+  const r = img.getBoundingClientRect();
+  return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+}
+
+function svEndPointer(e, cancelled){
   if (!svPointers.has(e.pointerId)) return;
+  const tapped = !cancelled && svTap && svTap.id === e.pointerId;
+  svTap = null;
   svPointers.delete(e.pointerId);
   try { svBody().releasePointerCapture(e.pointerId); } catch(_) {}
   if (svPointers.size < 2) svPinch = null;
   if (svPointers.size === 0) { svPan = null; applyShotZoom(); }
   else { const [p] = [...svPointers.values()]; svPan = { x: p.x, y: p.y, tx: svTx, ty: svTy }; }
+  // 点了一下图片外的空白处 = 退出大图，回到截图列表
+  if (tapped && svShown() && !svHitImage(e.clientX, e.clientY)) closeShotViewer();
 }
-svBody().addEventListener('pointerup', svEndPointer);
-svBody().addEventListener('pointercancel', svEndPointer);
+svBody().addEventListener('pointerup', e => svEndPointer(e, false));
+svBody().addEventListener('pointercancel', e => svEndPointer(e, true));
 
-// 双击：放大 / 复位
+// 双击：只在已放大时复位，不再双击放大
+// （左右翻页按钮点得快时浏览器会判成双击，原来会把图片放大）
 svBody().addEventListener('dblclick', e => {
   if (!svShown()) return;
   e.preventDefault();
   if (svScale > 1) resetShotZoom();
-  else zoomShotAt(e.clientX, e.clientY, 2.5);
 });
 
 // 窗口尺寸变化后重新适应
