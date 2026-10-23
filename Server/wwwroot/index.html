@@ -401,7 +401,7 @@
           <button class="dlgSideBtn" id="dlgRemoteBtn" onclick="openRemoteInputMode()"
                   title="进入远程控制（鼠标 / 键盘）">🖱️ 远控</button>
           <button class="dlgSideBtn" onclick="openShotsFromDialog()"
-                  title="查看该机器已归档的历史截图">🖼️ 查看</button>
+                  title="查看该机器已归档的历史截图">📺 查看</button>
         </div>
       </div>
     </div>
@@ -436,7 +436,7 @@
       <div class="dlgFooter">
         <button class="cancelBtn" onclick="toggleSettings()">← 返回</button>
         <button class="dlgSideBtn" onclick="openShotsFromDialog()"
-                title="查看该机器已归档的历史截图">🖼️ 查看截图</button>
+                title="查看该机器已归档的历史截图">📺 查看截图</button>
       </div>
     </div>
   </div>
@@ -487,7 +487,7 @@
   <header>
     <h1>💻 PC 远程监控</h1>
     <span id="badge" class="badge err">未连接</span>
-    <button class="viewToggleBtn" style="margin-left:auto" onclick="openShotsPage()" title="查看历史截图（按天）">🖼️ 历史截图</button>
+    <button class="viewToggleBtn" style="margin-left:auto" onclick="openShotsPage()" title="查看历史截图（按天）">📺 历史截图</button>
     <button class="viewToggleBtn" onclick="openAllScreens()" title="全屏监控模式">⊞ 全屏监控</button>
   </header>
   <div style="padding:16px">
@@ -502,7 +502,7 @@
     <span id="pcTitle"></span>
     <div class="headerActionGrp">
       <button class="headerShotBtn" onclick="openShotsPage(currentPcId)"
-              title="查看这台机器的历史截图">🖼️ 查看</button>
+              title="查看这台机器的历史截图">📺 查看</button>
       <button class="headerShotBtn" id="headerRemoteBtn" onclick="openRemoteInputMode()"
               title="进入远程控制（鼠标 / 键盘）">🖱️ 远控</button>
     </div>
@@ -542,7 +542,7 @@
 <div id="shotsPage">
   <div id="shotsToolbar">
     <button class="backBtn" onclick="closeShotsPage()">&#8592; 返回</button>
-    <span id="shotsTitle">🖼️ 历史截图</span>
+    <span id="shotsTitle">📺 历史截图</span>
     <select id="shotsPcSel" onchange="onShotsPcChange()" title="选择机器"></select>
     <select id="shotsDateSel" onchange="onShotsDateChange()" title="选择日期"></select>
     <button class="svBtn" onclick="openShotCfg(shotsPcId, shotsPcName)"
