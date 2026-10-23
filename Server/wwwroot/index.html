@@ -41,14 +41,21 @@
     /* ── 查看页 ── */
     #viewPage{display:none;flex-direction:column;height:100vh}
     #viewPage header{flex-shrink:0}
-    /* 顶栏中间的「查看截图」入口：左右 auto 外边距把它居中在标题与画质之间 */
-    .headerShotBtn{margin:0 auto;background:none;border:1px solid #2a2a55;color:#cfd;
+    /* 顶栏中间的「查看 / 远控」入口：左右 auto 外边距把整组居中在标题与画质之间 */
+    .headerActionGrp{margin:0 auto;display:flex;align-items:center;gap:6px;
+                     flex-shrink:0}
+    .headerShotBtn{background:none;border:1px solid #2a2a55;color:#cfd;
                    font-size:12px;padding:5px 11px;border-radius:6px;cursor:pointer;
                    white-space:nowrap}
+    .headerActionGrp .headerShotBtn{margin:0}
     .headerShotBtn:hover{border-color:#5cf0b8;color:#5cf0b8}
+    /* 远控进行中：按钮保持高亮，提示当前已处于远程控制模式 */
+    .headerShotBtn.on{border-color:#5cf0b8;color:#5cf0b8;background:#0e2a1e}
     .backBtn{background:none;border:1px solid #5cf0b8;color:#5cf0b8;
              padding:5px 12px;border-radius:6px;cursor:pointer;font-size:13px}
-    #pcTitle{margin-left:10px;font-size:15px}
+    /* 窄屏时机器名过长会自动省略，保证右侧按钮不被挤出屏幕 */
+    #pcTitle{margin-left:10px;font-size:15px;min-width:0;overflow:hidden;
+             text-overflow:ellipsis;white-space:nowrap}
     #fpsInfo{margin-left:auto;font-size:11px;color:#778;cursor:pointer;
              border-bottom:1px dotted #445;transition:color .15s,border-color .15s}
     #fpsInfo:hover{color:#5cf0b8;border-bottom-color:#5cf0b8}
@@ -80,10 +87,11 @@
     .cancelBtn{margin-top:14px;background:none;border:none;color:#667;
                font-size:13px;cursor:pointer;padding:4px 0}
     .cancelBtn:hover{color:#eef}
-    /* 弹框底部一行：左侧返回/取消，右侧「查看截图」入口 */
+    /* 弹框底部一行：左侧返回/取消，右侧「远控 / 截图」入口 */
     .dlgFooter{display:flex;align-items:center;justify-content:space-between;
                gap:10px;margin-top:14px}
     .dlgFooter .cancelBtn{margin-top:0}
+    .dlgFooterSide{display:flex;align-items:center;gap:8px;flex-shrink:0}
     .dlgSideBtn{background:none;border:1px solid #2a2a55;color:#cfd;
                 font-size:12px;padding:5px 10px;border-radius:6px;cursor:pointer;
                 white-space:nowrap}
@@ -389,8 +397,12 @@
       <div id="qualityBtns"></div>
       <div class="dlgFooter">
         <button class="cancelBtn" onclick="cancelQuality()">取消</button>
-        <button class="dlgSideBtn" onclick="openShotsFromDialog()"
-                title="查看该机器已归档的历史截图">🖼️ 查看截图</button>
+        <div class="dlgFooterSide">
+          <button class="dlgSideBtn" id="dlgRemoteBtn" onclick="openRemoteInputMode()"
+                  title="进入远程控制（鼠标 / 键盘）">🖱️ 远控</button>
+          <button class="dlgSideBtn" onclick="openShotsFromDialog()"
+                  title="查看该机器已归档的历史截图">🖼️ 查看</button>
+        </div>
       </div>
     </div>
 
@@ -488,8 +500,12 @@
   <header>
     <button class="backBtn" onclick="goBack()">&#8592; 返回</button>
     <span id="pcTitle"></span>
-    <button class="headerShotBtn" onclick="openShotsPage(currentPcId)"
-            title="查看这台机器的历史截图">🖼️ 查看截图</button>
+    <div class="headerActionGrp">
+      <button class="headerShotBtn" onclick="openShotsPage(currentPcId)"
+              title="查看这台机器的历史截图">🖼️ 查看</button>
+      <button class="headerShotBtn" id="headerRemoteBtn" onclick="openRemoteInputMode()"
+              title="进入远程控制（鼠标 / 键盘）">🖱️ 远控</button>
+    </div>
     <span id="fpsInfo" onclick="openQualityChange()" title="点击修改画质"></span>
   </header>
   <div id="screenWrap" style="position:relative">
@@ -817,6 +833,7 @@ function watchPc(pcId, pcName){
   // 重置到质量选择视图
   document.getElementById('qualityContent').style.display = 'block';
   document.getElementById('settingsPanel').style.display  = 'none';
+  syncDlgRemoteBtn();
   highlightQualityBtn(0); // 新PC无预设画质，清除选中
 }
 
@@ -824,6 +841,12 @@ function highlightQualityBtn(quality){
   document.querySelectorAll('#qualityContent .qBtn').forEach(btn => {
     btn.classList.toggle('selected', Number(btn.dataset.quality) === quality);
   });
+}
+
+// 画质弹框里的「远控」只对具体某台 PC 有意义（全屏监控模式没有目标机器）
+function syncDlgRemoteBtn(){
+  const el = document.getElementById('dlgRemoteBtn');
+  if (el) el.style.display = pendingPcId ? '' : 'none';
 }
 
 function cancelQuality(){
@@ -850,6 +873,7 @@ function openQualityChange(){
   document.getElementById('qualityMask').classList.add('show');
   document.getElementById('qualityContent').style.display = 'block';
   document.getElementById('settingsPanel').style.display  = 'none';
+  syncDlgRemoteBtn();
   settingsOpen = false;
   highlightQualityBtn(currentViewQuality); // 高亮当前画质
 }
@@ -867,6 +891,7 @@ function toggleSettings(){
   settingsOpen = !settingsOpen;
   document.getElementById('qualityContent').style.display = settingsOpen ? 'none'  : 'block';
   document.getElementById('settingsPanel').style.display  = settingsOpen ? 'block' : 'none';
+  if (!settingsOpen) syncDlgRemoteBtn();
   if (settingsOpen && pendingPcId){
     syncPanelFields();
     document.getElementById('btnLock').textContent = !!pcLocked[pendingPcId] ? '✅ 已锁定，再次锁定' : '🔒 锁定鼠标';
@@ -1780,6 +1805,8 @@ function openAllScreensQualityChange(){
   document.getElementById('qualityMask').classList.add('show');
   document.getElementById('qualityContent').style.display = 'block';
   document.getElementById('settingsPanel').style.display  = 'none';
+  // 全屏监控没有具体目标机器，远控入口在这里不适用（syncDlgRemoteBtn 会隐藏它）
+  syncDlgRemoteBtn();
   settingsOpen = false;
   highlightQualityBtn(allScreensQuality); // 高亮当前画质
 }
@@ -2299,6 +2326,8 @@ function openRemoteInputMode(){
 function enableRemoteInput(){
   remoteInputActive = true;
   document.getElementById('remoteInputBar').style.display = 'flex';
+  const hdrBtn = document.getElementById('headerRemoteBtn');
+  if (hdrBtn) hdrBtn.classList.add('on');
   // 远程控制中隐藏时间与版本号
   const tOverlay = document.getElementById('clientTimeOverlay');
   tOverlay.style.display = 'none';
@@ -2309,6 +2338,8 @@ function enableRemoteInput(){
 function closeRemoteInput(){
   remoteInputActive = false;
   document.getElementById('remoteInputBar').style.display = 'none';
+  const hdrBtn = document.getElementById('headerRemoteBtn');
+  if (hdrBtn) hdrBtn.classList.remove('on');
   document.getElementById('remoteClickOverlay').style.display = 'none';
   remoteActiveMods.clear();
   _updateModBtns();
