@@ -226,8 +226,11 @@
                color:#667;cursor:pointer;font-size:17px;padding:2px 6px;
                line-height:1;transition:color .12s}
     .rib-close:hover{color:#f07060}
-    #remoteTextInput{flex:1;background:#111125;border:1px solid #2a2a55;
-                     color:#eef;padding:6px 10px;border-radius:6px;font-size:13px}
+    #remoteTextInput{flex:1;min-width:0;background:#111125;border:1px solid #2a2a55;
+                     color:#eef;padding:6px 10px;border-radius:6px;font-size:13px;
+                     font-family:inherit;line-height:1.4;resize:none;
+                     max-height:40vh;overflow-y:hidden;
+                     user-select:text;-webkit-user-select:text}
     #remoteTextInput:focus{outline:none;border-color:#5cf0b8}
     .rib-send{background:#0e2a1e;border:1px solid #5cf0b8;color:#5cf0b8;
               padding:6px 14px;border-radius:6px;font-size:12px;cursor:pointer;
@@ -606,7 +609,8 @@
   </div>
   <!-- 行4：文字输入 -->
   <div class="rib-row" style="gap:6px">
-    <input type="text" id="remoteTextInput" placeholder="输入文字（支持中英文）..."/>
+    <textarea id="remoteTextInput" rows="1"
+              placeholder="输入文字（Enter 发送，Shift+Enter 换行）..."></textarea>
     <button class="rib-send" onclick="sendTextCmd()">发送</button>
   </div>
 </div>
@@ -1056,6 +1060,10 @@ const QUALITY_PRESETS = [
   { quality: 88,  px: 2048, fps: 1, label: '⚪ 超清', desc: '2048px · JPEG 88%' },
   { quality: 100, px: 2560, fps: 1, label: '🔵 极清', desc: '2560px · JPEG 100%' },
 ];
+
+// 单人查看 / 远控的最低画质：高清档（从档位表取，避免与选项表重复维护数值）
+const SINGLE_MIN_QUALITY =
+  (QUALITY_PRESETS.find(p => p.label.includes('高清')) || { quality: 78 }).quality;
 
 // 取某个档位的像素宽（画质值不在表里时取最接近的档位）
 function pxForQuality(q){
@@ -1751,7 +1759,9 @@ function openFocusedPc(pcId, pcName){
   prevPage = 'allscreens';
   currentPcId = pcId;
   currentPcNameStr = pcName || '';
-  currentViewQuality = allScreensQuality;
+  // 进入单人监控自动切到高清；多人监控的画质（allScreensQuality）保持不变。
+  // 多人画质本身高于高清时沿用更高档，避免聚焦后反而降质。
+  currentViewQuality = Math.max(allScreensQuality, SINGLE_MIN_QUALITY);
   viewMode = 'single';
   watchStartTs = Date.now();
   fpsCount = 0; lastFpsTs = Date.now();
@@ -2299,6 +2309,10 @@ function openRemoteInputMode(){
   const pcName = pendingPcName || currentPcNameStr || '';
   if (!pcId){ showToast('请先选择一台 PC'); return; }
   cancelQuality();
+
+  // 远控最低要求高清：已经高清或更高就保持原样，不重新下发 watch
+  const targetQuality = Math.max(currentViewQuality || 0, SINGLE_MIN_QUALITY);
+
   if (viewMode !== 'single' || currentPcId !== pcId){
     if (viewMode === 'allscreens'){
       if (ws && ws.readyState === WebSocket.OPEN)
@@ -2307,7 +2321,7 @@ function openRemoteInputMode(){
     }
     currentPcId       = pcId;
     currentPcNameStr  = pcName;
-    currentViewQuality = 60;
+    currentViewQuality = targetQuality;
     viewMode           = 'single';
     watchStartTs       = Date.now();
     fpsCount = 0; lastFpsTs = Date.now();
@@ -2318,7 +2332,15 @@ function openRemoteInputMode(){
     document.getElementById('viewPage').style.display      = 'flex';
     clearScreen();
     if (ws && ws.readyState === WebSocket.OPEN)
-      ws.send(watchCmd(pcId, 60, 1));
+      ws.send(watchCmd(pcId, currentViewQuality, 1));
+  } else if (currentViewQuality < SINGLE_MIN_QUALITY){
+    // 已在该 PC 的单人页，但画质低于高清：只提升画质，不重开页面
+    currentViewQuality = SINGLE_MIN_QUALITY;
+    watchStartTs = Date.now();
+    fpsCount = 0; lastFpsTs = Date.now();
+    if (ws && ws.readyState === WebSocket.OPEN)
+      ws.send(watchCmd(pcId, currentViewQuality, 1));
+    document.getElementById('fpsInfo').textContent = qualityLabel(currentViewQuality);
   }
   enableRemoteInput();
 }
@@ -2326,6 +2348,7 @@ function openRemoteInputMode(){
 function enableRemoteInput(){
   remoteInputActive = true;
   document.getElementById('remoteInputBar').style.display = 'flex';
+  autoGrowRemoteInput();
   const hdrBtn = document.getElementById('headerRemoteBtn');
   if (hdrBtn) hdrBtn.classList.add('on');
   // 远程控制中隐藏时间与版本号
@@ -2333,6 +2356,17 @@ function enableRemoteInput(){
   tOverlay.style.display = 'none';
   tOverlay.innerHTML = '';
   _updateRemoteOverlay();
+}
+
+// 文字输入框随内容自动变高（多行时向上扩展，超过约 40% 屏高后内部滚动）
+function autoGrowRemoteInput(){
+  const el = document.getElementById('remoteTextInput');
+  if (!el) return;
+  el.style.height = 'auto';
+  const max = Math.min(Math.round(window.innerHeight * 0.4), 160);
+  const need = el.scrollHeight + 2; // +2 补边框（全局 border-box）
+  el.style.height = Math.min(need, max) + 'px';
+  el.style.overflowY = need > max ? 'auto' : 'hidden';
 }
 
 function closeRemoteInput(){
@@ -2434,12 +2468,54 @@ function sendKeyCmd(key){
     _sendRemote({cmd:'key_input', key, mods});
 }
 
+// 服务端的 viewer WebSocket 接收缓冲区只有 512 字节，且不会拼装分片消息：
+// 单条 JSON 超过 512 字节会被截断，服务端解析失败后直接断开连接，
+// 页面表现为「发送长文本后闪退 / 刷新」。这里按 JSON 实际字节数拆成多条发送。
+const VIEWER_MSG_SAFE_BYTES = 480;
+
 function sendTextCmd(){
   const inp  = document.getElementById('remoteTextInput');
+  if (!inp) return;
   const text = inp.value;
   if (!text) return;
-  _sendRemote({cmd:'text_input', text});
+  const pcId = _remoteTargetPcId();
+  if (!pcId){ showToast('未选择 PC'); return; }
+  if (!ws || ws.readyState !== WebSocket.OPEN){ showToast('未连接'); return; }
+
+  sendTextChunks(pcId, text);
+
   inp.value = '';
+  autoGrowRemoteInput();
+  inp.focus();
+}
+
+// 长文本按 UTF-8/JSON 转义后的真实字节数切块，逐条发送；换行用 key_input enter 补发
+function sendTextChunks(pcId, text){
+  const enc = new TextEncoder();
+  const makeMsg = chunk =>
+    JSON.stringify({action:'control', pcId, cmd:'text_input', text: chunk});
+  const baseBytes = enc.encode(makeMsg('')).length;
+
+  let chunk = '', used = baseBytes;
+  const flush = () => {
+    if (!chunk) return;
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(makeMsg(chunk));
+    chunk = ''; used = baseBytes;
+  };
+
+  const lines = text.split(/\r\n|\r|\n/);
+  lines.forEach((line, i) => {
+    for (const ch of line){
+      // JSON 转义后的字节数：中文 3 字节、emoji 4 字节、引号/换行等转义符按其实际长度
+      const n = enc.encode(JSON.stringify(ch).slice(1, -1)).length;
+      if (chunk && used + n > VIEWER_MSG_SAFE_BYTES) flush();
+      chunk += ch;
+      used += n;
+    }
+    flush();
+    if (i < lines.length - 1 && ws && ws.readyState === WebSocket.OPEN)
+      ws.send(JSON.stringify({action:'control', pcId, cmd:'key_input', key:'enter', mods:[]}));
+  });
 }
 
 // 远程拖拽模式开关（false=拖拽平移画面，true=拖拽发远程拖拽指令）
@@ -2583,10 +2659,16 @@ function toggleRemoteDragMode(){
 
   bindOverlay(document.getElementById('remoteClickOverlay'));
 
-  // 文字输入框回车发送
-  document.getElementById('remoteTextInput').addEventListener('keydown', e => {
-    if (e.key === 'Enter'){ e.preventDefault(); sendTextCmd(); }
+  // 文字输入框：Enter 发送，Shift+Enter 换行；中文输入法组词时的 Enter 不发送
+  const txtEl = document.getElementById('remoteTextInput');
+  txtEl.addEventListener('input', autoGrowRemoteInput);
+  txtEl.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229){
+      e.preventDefault();
+      sendTextCmd();
+    }
   });
+  window.addEventListener('resize', () => { if (remoteInputActive) autoGrowRemoteInput(); });
 })();
 
 // 先校验登录会话，未登录跳转登录页；已登录才建立 WebSocket 连接
